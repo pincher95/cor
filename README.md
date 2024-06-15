@@ -1,0 +1,2 @@
+# cor
+Cloud orphan resources
