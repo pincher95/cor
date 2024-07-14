@@ -48,6 +48,7 @@ func (p *client) PrintTextTable(data *[]table.Row) error {
 	t.Style().Options.SeparateRows = true
 	t.SortBy(*p.Printer.Sort)
 	t.SetColumnConfigs(*p.Printer.ColumnConfig)
+	t.SuppressTrailingSpaces()
 	t.Render()
 
 	return nil
