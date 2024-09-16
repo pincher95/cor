@@ -18,7 +18,7 @@ func NewLogger() *Logger {
 }
 
 // LogError logs an error with a message and context.
-func (l *Logger) LogError(message string, err error, context map[string]interface{}) {
+func (l *Logger) LogError(message string, err error, context map[string]interface{}, exit bool) {
 	logMessage := message
 	if err != nil {
 		logMessage += ": " + err.Error()
@@ -30,6 +30,9 @@ func (l *Logger) LogError(message string, err error, context map[string]interfac
 		}
 	}
 	l.logger.Println(logMessage)
+	if exit {
+		os.Exit(1)
+	}
 }
 
 // LogInfo logs an informational message with context.

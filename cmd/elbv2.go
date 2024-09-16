@@ -16,7 +16,6 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
-	"github.com/pincher95/cor/pkg/handlers/errorhandling"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
@@ -33,7 +32,6 @@ var elbv2Cmd = &cobra.Command{
 
 		// Create a new logger and error handler
 		logger := logging.NewLogger()
-		errorHandler := errorhandling.NewErrorHandler(logger)
 
 		// Get the flags from the command and also the additional flags specific to this command
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
@@ -51,7 +49,7 @@ var elbv2Cmd = &cobra.Command{
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			errorHandler.HandleError("Error getting flags", err, nil, true)
+			logger.LogError("Error getting flags", err, nil, true)
 			return
 		}
 
@@ -63,7 +61,7 @@ var elbv2Cmd = &cobra.Command{
 
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			errorHandler.HandleError("Failed loading AWS client config", err, nil, true)
+			logger.LogError("Failed loading AWS client config", err, nil, true)
 			return
 		}
 
@@ -113,7 +111,7 @@ var elbv2Cmd = &cobra.Command{
 		for {
 			select {
 			case err := <-errorChan:
-				errorHandler.HandleError("Error during loadbalancer processing", err, nil, true)
+				logger.LogError("Error during loadbalancer processing", err, nil, true)
 				return
 			case <-doneChan:
 				close(tableRowChan)
@@ -142,7 +140,7 @@ var elbv2Cmd = &cobra.Command{
 				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "LoadBalancer ARN", "targerGroups without targets", "VPC ID"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
 
 				if err := printerClient.PrintTextTable(&tableRows); err != nil {
-					errorHandler.HandleError("Error printing table", err, nil, false)
+					logger.LogError("Error printing table", err, nil, false)
 				}
 
 				if flagValues["delete"].(bool) {
@@ -162,7 +160,7 @@ var elbv2Cmd = &cobra.Command{
 							for listenerPaginator.HasMorePages() {
 								listenerPage, err := listenerPaginator.NextPage(ctx)
 								if err != nil {
-									errorHandler.HandleError("Error during loadbalancer listerner processing", err, nil, false)
+									logger.LogError("Error during loadbalancer listerner processing", err, nil, false)
 								}
 
 								for _, listener := range listenerPage.Listeners {
@@ -172,7 +170,7 @@ var elbv2Cmd = &cobra.Command{
 										ListenerArn: listener.ListenerArn,
 									})
 									if err != nil {
-										errorHandler.HandleError("Error deleting loadbalancer listerner", err, nil, false)
+										logger.LogError("Error deleting loadbalancer listerner", err, nil, false)
 									}
 								}
 							}
@@ -181,7 +179,7 @@ var elbv2Cmd = &cobra.Command{
 								Names: strings.Split(tableRow[2].(string), "\n"),
 							})
 							if err != nil {
-								errorHandler.HandleError("Error during targets groups processing", err, nil, false)
+								logger.LogError("Error during targets groups processing", err, nil, false)
 							}
 
 							for _, target := range targerGroups.TargetGroups {
@@ -190,7 +188,7 @@ var elbv2Cmd = &cobra.Command{
 									TargetGroupArn: target.TargetGroupArn,
 								})
 								if err != nil {
-									errorHandler.HandleError("Error deleting targets groups", err, nil, false)
+									logger.LogError("Error deleting targets groups", err, nil, false)
 								}
 							}
 
@@ -198,7 +196,7 @@ var elbv2Cmd = &cobra.Command{
 								LoadBalancerArn: aws.String(tableRow[1].(string)),
 							})
 							if err != nil {
-								errorHandler.HandleError("Error deleting loadbalancer", err, nil, false)
+								logger.LogError("Error deleting loadbalancer", err, nil, false)
 							}
 						}
 					} else if response == "no" || response == "n" {

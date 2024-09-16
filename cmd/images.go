@@ -21,7 +21,6 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
-	"github.com/pincher95/cor/pkg/handlers/errorhandling"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
@@ -38,7 +37,6 @@ var imagesCmd = &cobra.Command{
 
 		// Create a new logger and error handler
 		logger := logging.NewLogger()
-		errorHandler := errorhandling.NewErrorHandler(logger)
 
 		// Get the flags from the command and also the additional flags specific to this command
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
@@ -72,7 +70,7 @@ var imagesCmd = &cobra.Command{
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			errorHandler.HandleError("Error getting flags", err, nil, true)
+			logger.LogError("Error getting flags", err, nil, true)
 			return
 		}
 
@@ -88,7 +86,7 @@ var imagesCmd = &cobra.Command{
 		if flagValues["creation-date-before"].(string) != "" {
 			t, err := time.Parse(dateLayout, flagValues["creation-date-before"].(string))
 			if err != nil {
-				errorHandler.HandleError("Error parsing creation date", err, nil, false)
+				logger.LogError("Error parsing creation date", err, nil, false)
 				return
 			}
 			beforeCreationDate = &t
@@ -96,7 +94,7 @@ var imagesCmd = &cobra.Command{
 		if flagValues["creation-date-after"].(string) != "" {
 			t, err := time.Parse(dateLayout, flagValues["creation-date-after"].(string))
 			if err != nil {
-				errorHandler.HandleError("Error parsing creation date", err, nil, false)
+				logger.LogError("Error parsing creation date", err, nil, false)
 				return
 			}
 			afterCreationDate = &t
@@ -105,7 +103,7 @@ var imagesCmd = &cobra.Command{
 		// Create a new AWS client
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			errorHandler.HandleError("Failed loading AWS client config", err, nil, true)
+			logger.LogError("Failed loading AWS client config", err, nil, true)
 			return
 		}
 
@@ -118,7 +116,7 @@ var imagesCmd = &cobra.Command{
 		// Get the account ID
 		ownerID, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 		if err != nil {
-			errorHandler.HandleError("Error getting caller identity", err, nil, false)
+			logger.LogError("Error getting caller identity", err, nil, false)
 		}
 
 		var wg sync.WaitGroup
@@ -136,7 +134,7 @@ var imagesCmd = &cobra.Command{
 			defer wg.Done()
 			err := describeImages(ctx, ec2Client, imagesChan, ownerID.Account, aws.String(flagValues["filter-by-name"].(string)), beforeCreationDate, afterCreationDate)
 			if err != nil {
-				errorHandler.HandleError("Error describe images", err, nil, false)
+				logger.LogError("Error describe images", err, nil, false)
 			}
 		}()
 
@@ -149,7 +147,7 @@ var imagesCmd = &cobra.Command{
 		for {
 			select {
 			case err := <-errorChan:
-				errorHandler.HandleError("Error during volume processing", err, nil, true)
+				logger.LogError("Error during volume processing", err, nil, true)
 				return
 			case <-doneChan:
 				for image := range imagesChan {
@@ -158,12 +156,12 @@ var imagesCmd = &cobra.Command{
 					var usedByInstances, usedByLaunchTemplates []string
 					usedByInstances, err = describeInstances(ctx, ec2Client, image.ImageId)
 					if err != nil {
-						errorHandler.HandleError("Error describe instance", err, nil, false)
+						logger.LogError("Error describe instance", err, nil, false)
 					}
 
 					usedByLaunchTemplates, err = describeLaunchTemplate(ctx, ec2Client, image.ImageId)
 					if err != nil {
-						errorHandler.HandleError("Error describe launch template", err, nil, false)
+						logger.LogError("Error describe launch template", err, nil, false)
 					}
 
 					if len(usedByInstances) == 0 && len(usedByLaunchTemplates) == 0 {
@@ -205,7 +203,7 @@ var imagesCmd = &cobra.Command{
 				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance", "used by Launch Template"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
 
 				if err := printerClient.PrintTextTable(&tableRows); err != nil {
-					errorHandler.HandleError("Error printing table", err, nil, false)
+					logger.LogError("Error printing table", err, nil, false)
 				}
 
 				if flagValues["delete"].(bool) && len(tableRows) > 0 {
@@ -222,13 +220,13 @@ var imagesCmd = &cobra.Command{
 								// DryRun: aws.Bool(true),
 							})
 							if err != nil {
-								errorHandler.HandleError("Error deregistering image", err, nil, false)
+								logger.LogError("Error deregistering image", err, nil, false)
 							}
 
 							// Verify that the image has been deregistered
 							err = waitForImageDeregistration(context.TODO(), ec2Client, tableRow[1].(string))
 							if err != nil {
-								logger.LogError("Error verifying image deregistration", err, nil)
+								logger.LogError("Error verifying image deregistration", err, nil, false)
 							}
 							logger.LogInfo("Verified image has been deregistered", map[string]interface{}{"imageID": tableRow[1].(string)})
 
@@ -239,7 +237,7 @@ var imagesCmd = &cobra.Command{
 									// DryRun: aws.Bool(true),
 								})
 								if err != nil {
-									errorHandler.HandleError("Error deleting snapshot", err, nil, false)
+									logger.LogError("Error deleting snapshot", err, nil, false)
 								}
 							}
 						}

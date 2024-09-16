@@ -16,7 +16,6 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
-	"github.com/pincher95/cor/pkg/handlers/errorhandling"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
@@ -39,7 +38,6 @@ var volumesCmd = &cobra.Command{
 
 		// Create a new logger and error handler
 		logger := logging.NewLogger()
-		errorHandler := errorhandling.NewErrorHandler(logger)
 
 		// Get the flags from the command and also the additional flags specific to this command
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
@@ -57,7 +55,7 @@ var volumesCmd = &cobra.Command{
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			errorHandler.HandleError("Error getting flags", err, nil, true)
+			logger.LogError("Error getting flags", err, nil, true)
 			return
 		}
 
@@ -69,7 +67,7 @@ var volumesCmd = &cobra.Command{
 
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			errorHandler.HandleError("Failed loading AWS client config", err, nil, true)
+			logger.LogError("Failed loading AWS client config", err, nil, true)
 			return
 		}
 
@@ -114,7 +112,7 @@ var volumesCmd = &cobra.Command{
 		for {
 			select {
 			case err := <-errorChan:
-				errorHandler.HandleError("Error during volume processing", err, nil, true)
+				logger.LogError("Error during volume processing", err, nil, true)
 				return
 			case <-doneChan:
 				close(volumeWithTagsChan)
@@ -157,7 +155,7 @@ var volumesCmd = &cobra.Command{
 				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
 
 				if err := printerClient.PrintTextTable(&tableRows); err != nil {
-					errorHandler.HandleError("Error printing table", err, nil, false)
+					logger.LogError("Error printing table", err, nil, false)
 				}
 
 				if flagValues["delete"].(bool) {
@@ -178,7 +176,7 @@ var volumesCmd = &cobra.Command{
 								VolumeId: aws.String(tableRow[1].(string)),
 							})
 							if err != nil {
-								errorHandler.HandleError("Error deleting volume", err, nil, false)
+								logger.LogError("Error deleting volume", err, nil, false)
 							}
 						}
 					} else if response == "no" || response == "n" {
