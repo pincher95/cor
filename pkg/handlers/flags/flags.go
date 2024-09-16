@@ -41,7 +41,7 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (map[string]i
 	}
 
 	allFlags := append(baseFlags, additionalFlags...)
-	results := make(map[string]interface{})
+	results := make(map[string]interface{}, len(allFlags))
 
 	for _, flag := range allFlags {
 		var err error

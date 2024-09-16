@@ -6,14 +6,14 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var cfgFile string
-var tableRows []table.Row
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -33,7 +33,11 @@ to quickly create a Cobra application.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	logger := logging.NewLogger()
+	// errorHandler := errorhandling.NewErrorHandler(logger)
+	start := time.Now()
 	err := rootCmd.Execute()
+	logger.LogInfo("Time taken to process:", map[string]interface{}{"time": time.Since(start).String()})
 	if err != nil {
 		os.Exit(1)
 	}
@@ -58,7 +62,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.cor.yaml)")
 	rootCmd.PersistentFlags().StringP("region", "r", "us-east-1", "AWS region")
-	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentiol file profile")
+	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentials file profile")
 	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication methos AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
 	rootCmd.PersistentFlags().Bool("delete", false, "Delete Orphant resources")
 

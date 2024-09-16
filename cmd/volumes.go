@@ -4,9 +4,10 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"bufio"
 	"context"
-	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,8 +15,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
-	"github.com/pincher95/cor/pkg/handlers"
-	"github.com/pincher95/cor/pkg/printer"
+	handlers "github.com/pincher95/cor/pkg/handlers/aws"
+	"github.com/pincher95/cor/pkg/handlers/errorhandling"
+	"github.com/pincher95/cor/pkg/handlers/flags"
+	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -31,99 +35,160 @@ var volumesCmd = &cobra.Command{
 	Short: "A brief description of your command",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
-		region, err := cmd.Flags().GetString("region")
-		if err != nil {
-			fmt.Println(err)
+		ctx := context.TODO()
+
+		// Create a new logger and error handler
+		logger := logging.NewLogger()
+		errorHandler := errorhandling.NewErrorHandler(logger)
+
+		// Get the flags from the command and also the additional flags specific to this command
+		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
+		// Specify additional flags that are specific to this command
+		additionalFlags := []flags.Flag{
+			{
+				Name: "filter-by-name",
+				Type: "string",
+			},
+			{
+				Name: "delete",
+				Type: "bool",
+			},
 		}
 
-		authMethod, err := cmd.Flags().GetString("auth-method")
+		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			fmt.Println(err)
+			errorHandler.HandleError("Error getting flags", err, nil, true)
+			return
 		}
 
-		profile, err := cmd.Flags().GetString("profile")
-		if err != nil {
-			fmt.Println(err)
+		cloudConfig := &handlers.CloudConfig{
+			AuthMethod: aws.String(flagValues["auth-method"].(string)),
+			Profile:    aws.String(flagValues["profile"].(string)),
+			Region:     aws.String(flagValues["region"].(string)),
 		}
 
-		volumeName, err := cmd.Flags().GetString("filter-by-name")
+		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			fmt.Println(err)
-		}
-
-		cfg, err := handlers.NewConfig(authMethod, profile, region, "UTC", true, true)
-		if err != nil {
-			panic(fmt.Sprintf("failed loading config, %v", err))
+			errorHandler.HandleError("Failed loading AWS client config", err, nil, true)
+			return
 		}
 
 		ec2Client := ec2.NewFromConfig(*cfg)
 
-		// Create a sync.Pool to reuse table rows
-		rowPool := &sync.Pool{
-			New: func() interface{} {
-				return make([]table.Row, 0, 500)
-			},
-		}
-
-		tableRows := rowPool.Get().([]table.Row)
-
 		var wg sync.WaitGroup
 
 		// Create a channel to process volumes concurrently
-		volumeChan := make(chan volumeWithTags, 500)
+		volumeChan := make(chan volumeWithTags, 10)
+		volumeWithTagsChan := make(chan volumeWithTags, 10)
+		errorChan := make(chan error, 1)
+		doneChan := make(chan struct{})
+
+		// Create a slice of table.Row
+		var tableRows []table.Row
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer close(volumeChan)
-			describeVolumes(context.TODO(), ec2Client, volumeChan, &volumeName)
-		}()
-
-		// Start a goroutine to process volumes
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			// Create a slice to store the total size of all volumes
-			size := int32(0)
-			for volumeWithTags := range volumeChan {
-				volume := volumeWithTags.Volume
-				tagMap := volumeWithTags.TagMap
-
-				nameTag, ok := tagMap["Name"]
-				if !ok {
-					nameTag = types.Tag{Value: aws.String("-")}
-				}
-
-				tableRows = append(tableRows, table.Row{
-					*nameTag.Value,
-					*volume.VolumeId,
-					*volume.SnapshotId,
-					*volume.Size,
-				})
-
-				// Put the table rows back into the pool
-				rowPool.Put(tableRows)
-
-				size += *volume.Size
+			volumeFilter := []types.Filter{
+				{
+					Name:   aws.String("status"),
+					Values: []string{"available"},
+				},
+				{
+					Name:   aws.String("tag:Name"),
+					Values: []string{flagValues["filter-by-name"].(string)},
+				},
 			}
-			tableRows = append(tableRows, table.Row{"", "", "", size, "Total"})
+			if err := describeVolumes(ctx, ec2Client, volumeChan, volumeFilter); err != nil {
+				errorChan <- err
+				return
+			}
 		}()
 
 		// Wait for all goroutines to finish
-		wg.Wait()
+		go func() {
+			wg.Wait()
+			close(doneChan)
+		}()
 
-		columnConfig := []table.ColumnConfig{
-			{Name: "Name", AlignHeader: text.AlignCenter},
-			{Name: "Volume ID", AlignHeader: text.AlignCenter},
-			{Name: "Snapshot ID", AlignHeader: text.AlignCenter},
-			{Name: "Size", AlignHeader: text.AlignCenter},
-		}
+		for {
+			select {
+			case err := <-errorChan:
+				errorHandler.HandleError("Error during volume processing", err, nil, true)
+				return
+			case <-doneChan:
+				close(volumeWithTagsChan)
+				size := int32(0)
+				for row := range volumeChan {
+					volumeWithTags, err := handleVolume(row)
+					if err != nil {
+						errorChan <- err
+						return
+					}
 
-		printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
+					tableRows = append(tableRows, table.Row{
+						*volumeWithTags.TagMap["Name"].Value,
+						*volumeWithTags.Volume.VolumeId,
+						*volumeWithTags.Volume.SnapshotId,
+						*volumeWithTags.Volume.Size,
+					})
+					size += *volumeWithTags.Volume.Size
+				}
+				tableRows = append(tableRows, table.Row{"", "", "", size, "Total"})
+				columnConfig := []table.ColumnConfig{
+					{
+						Name:        "Name",
+						AlignHeader: text.AlignCenter,
+					},
+					{
+						Name:        "Volume ID",
+						AlignHeader: text.AlignCenter,
+					},
+					{
+						Name:        "Snapshot ID",
+						AlignHeader: text.AlignCenter,
+					},
+					{
+						Name:        "Size",
+						AlignHeader: text.AlignCenter,
+					},
+				}
 
-		if err := printerClient.PrintTextTable(&tableRows); err != nil {
-			fmt.Printf("%v", err)
+				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
+
+				if err := printerClient.PrintTextTable(&tableRows); err != nil {
+					errorHandler.HandleError("Error printing table", err, nil, false)
+				}
+
+				if flagValues["delete"].(bool) {
+					reader := bufio.NewReader(os.Stdin)
+					logger.LogInfo("Are you sure you want to proceed? (yes/no): ", nil)
+					response, _ := reader.ReadString('\n')
+					response = strings.ToLower(strings.TrimSpace(response))
+
+					if response == "yes" || response == "y" {
+						for _, tableRow := range tableRows {
+							// Skip the last row which is the total
+							if tableRow[4].(string) == "Total" {
+								continue
+							}
+							// Delete the volume
+							logger.LogInfo("Deleting Volumes", map[string]interface{}{"VolumeName": tableRow[0].(string)})
+							_, err := ec2Client.DeleteVolume(ctx, &ec2.DeleteVolumeInput{
+								VolumeId: aws.String(tableRow[1].(string)),
+							})
+							if err != nil {
+								errorHandler.HandleError("Error deleting volume", err, nil, false)
+							}
+						}
+					} else if response == "no" || response == "n" {
+						logger.LogInfo("Aborted.", nil)
+					} else {
+						logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
+					}
+				}
+				return
+			}
 		}
 	},
 }
@@ -143,27 +208,17 @@ func init() {
 	volumesCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day.")
 }
 
-func describeVolumes(ctx context.Context, client *ec2.Client, volumeChan chan<- volumeWithTags, volumeName *string) error {
+func describeVolumes(ctx context.Context, client *ec2.Client, volumeChan chan<- volumeWithTags, filter []types.Filter) error {
 	// Create a paginator
 	paginator := ec2.NewDescribeVolumesPaginator(client, &ec2.DescribeVolumesInput{
-		Filters: []types.Filter{
-			{
-				Name: aws.String("status"),
-				Values: []string{
-					"available",
-				},
-			},
-			{
-				Name:   aws.String("tag:Name"),
-				Values: []string{*volumeName},
-			},
-		},
+		Filters: filter,
 	})
 
 	// Iterate over the pages
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(ctx)
 		if err != nil {
+			close(volumeChan)
 			return err
 		}
 
@@ -173,6 +228,20 @@ func describeVolumes(ctx context.Context, client *ec2.Client, volumeChan chan<- 
 			volumeChan <- volumeWithTags{Volume: volume, TagMap: tagMap}
 		}
 	}
-
+	close(volumeChan)
 	return nil
+}
+
+func handleVolume(volume volumeWithTags) (*volumeWithTags, error) {
+	_, ok := volume.TagMap["Name"]
+	if !ok {
+		volume.TagMap["Name"] = types.Tag{
+			Value: aws.String("-"),
+		}
+	}
+
+	return &volumeWithTags{
+		Volume: volume.Volume,
+		TagMap: volume.TagMap,
+	}, nil
 }

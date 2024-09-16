@@ -14,8 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
-	"github.com/pincher95/cor/pkg/handlers"
-	"github.com/pincher95/cor/pkg/printer"
+	handlers "github.com/pincher95/cor/pkg/handlers/aws"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
