@@ -4,6 +4,7 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -32,15 +33,15 @@ to quickly create a Cobra application.`,
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
-func Execute() {
+func Execute(ctx context.Context) error {
 	logger := logging.NewLogger()
-	// errorHandler := errorhandling.NewErrorHandler(logger)
 	start := time.Now()
-	err := rootCmd.Execute()
+	err := rootCmd.ExecuteContext(ctx)
 	logger.LogInfo("Time taken to process:", map[string]interface{}{"time": time.Since(start).String()})
 	if err != nil {
-		os.Exit(1)
+		return err
 	}
+	return nil
 }
 
 func addSubcommandsPallets() {
@@ -65,6 +66,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentials file profile")
 	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication methos AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
 	rootCmd.PersistentFlags().Bool("delete", false, "Delete Orphant resources")
+	rootCmd.PersistentFlags().Duration("timeout", 0, "Timeout for the command execution.")
 
 	// imagesCmd.PersistentFlags().String("creation-date", "", "The time when the image was created, in the ISO 8601 format in the UTC time zone (YYYY-MM-DDThh:mm:ss.sssZ), for example, 2021-09-29T11:04:43.305Z . You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day")
 
@@ -95,4 +97,9 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+// GetRootCommand returns the root command
+func GetRootCommand() *cobra.Command {
+	return rootCmd
 }
