@@ -6,13 +6,23 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
+	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/promter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+type AWSCommand struct {
+	AWSClient handlers.AWSClientImpl
+	Logger    *logging.Logger
+	Prompter  promter.Client
+	Output    io.Writer
+}
 
 var cfgFile string
 
@@ -66,7 +76,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentials file profile")
 	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication methos AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
 	rootCmd.PersistentFlags().Bool("delete", false, "Delete Orphant resources")
-	rootCmd.PersistentFlags().Duration("timeout", 0, "Timeout for the command execution.")
+	rootCmd.PersistentFlags().Duration("timeout", 300, "Timeout in seconds for the command execution.")
 
 	// imagesCmd.PersistentFlags().String("creation-date", "", "The time when the image was created, in the ISO 8601 format in the UTC time zone (YYYY-MM-DDThh:mm:ss.sssZ), for example, 2021-09-29T11:04:43.305Z . You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day")
 

@@ -4,7 +4,6 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +23,7 @@ import (
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
+	"github.com/pincher95/cor/pkg/handlers/promter"
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +37,11 @@ var imagesCmd = &cobra.Command{
 
 		// Create a new logger and error handler
 		logger := logging.NewLogger()
+
+		// Create a channels to process images concurrently
+		imagesChan := make(chan ec2types.Image, 1000)
+		errorChan := make(chan error, 1)
+		doneChan := make(chan struct{})
 
 		// Get the flags from the command and also the additional flags specific to this command
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
@@ -111,22 +116,17 @@ var imagesCmd = &cobra.Command{
 		ec2Client := ec2.NewFromConfig(*cfg)
 		// Create a new STS client
 		stsClient := sts.NewFromConfig(*cfg)
-		// Create a new Autoscaling client
-		// autoscalingClient := asg.NewFromConfig(*cfg)
+
 		// Get the account ID
 		ownerID, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 		if err != nil {
 			logger.LogError("Error getting caller identity", err, nil, false)
+			errorChan <- err
 		}
 
 		var wg sync.WaitGroup
 
 		tableRows := make([]table.Row, 0)
-
-		// Create a channels to process images concurrently
-		imagesChan := make(chan ec2types.Image, 1000)
-		errorChan := make(chan error, 1)
-		doneChan := make(chan struct{})
 
 		wg.Add(1)
 		// Start a goroutine to fetch images and send them to the channel
@@ -135,6 +135,7 @@ var imagesCmd = &cobra.Command{
 			err := describeImages(ctx, ec2Client, imagesChan, ownerID.Account, aws.String(flagValues["filter-by-name"].(string)), beforeCreationDate, afterCreationDate)
 			if err != nil {
 				logger.LogError("Error describe images", err, nil, false)
+				errorChan <- err
 			}
 		}()
 
@@ -207,12 +208,17 @@ var imagesCmd = &cobra.Command{
 				}
 
 				if flagValues["delete"].(bool) && len(tableRows) > 0 {
-					reader := bufio.NewReader(os.Stdin)
-					logger.LogInfo("Are you sure you want to proceed? (yes/no): ", nil)
-					response, _ := reader.ReadString('\n')
-					response = strings.ToLower(strings.TrimSpace(response))
+					userPromter := promter.NewConsolePrompter(os.Stdin, os.Stdout)
 
-					if response == "yes" || response == "y" {
+					confirm, err := userPromter.Confirm("Are you sure you want to proceed? (yes/no): ")
+					if err != nil {
+						logger.LogError("Error during user prompt", err, nil, false)
+						errorChan <- err
+					}
+
+					if confirm == nil {
+						logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
+					} else if *confirm {
 						for _, tableRow := range tableRows {
 							_, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 								ImageId: aws.String(tableRow[1].(string)),
@@ -242,10 +248,8 @@ var imagesCmd = &cobra.Command{
 							}
 						}
 
-					} else if response == "no" || response == "n" {
+					} else if !*confirm {
 						logger.LogInfo("Aborted.", nil)
-					} else {
-						logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
 					}
 				}
 				return

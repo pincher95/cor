@@ -5,7 +5,7 @@ package cmd
 
 import (
 	"context"
-	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +20,7 @@ import (
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
+	"github.com/pincher95/cor/pkg/handlers/promter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -34,14 +35,17 @@ var snapshotsCmd = &cobra.Command{
 	Use:   "snapshots",
 	Short: "Return Snapshots not associated with AMI, Volumes or created by Lifecycle policy",
 	Long:  ``,
-	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.TODO()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Create prompter using the prompter package
+		prompterClient := promter.NewConsolePrompter(os.Stdin, os.Stdout)
+		output := os.Stdout
 
-		// Create a new logger and error handler
-		logger := logging.NewLogger()
+		// Create a new context
+		ctx := cmd.Context()
 
 		// Get the flags from the command and also the additional flags specific to this command
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
+
 		// Specify additional flags that are specific to this command
 		additionalFlags := []flags.Flag{
 			{
@@ -56,8 +60,7 @@ var snapshotsCmd = &cobra.Command{
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			logger.LogError("Error getting flags", err, nil, true)
-			return
+			return ctx.Err()
 		}
 
 		cloudConfig := &handlers.CloudConfig{
@@ -68,110 +71,128 @@ var snapshotsCmd = &cobra.Command{
 
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
-			return
+			return ctx.Err()
 		}
 
+		// Create a new EC2 client
 		ec2Client := ec2.NewFromConfig(*cfg)
+		// Create a new STS client
 		stsClient := sts.NewFromConfig(*cfg)
 
-		selfAccount, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
+		awsClient := &handlers.AWSClientImpl{
+			EC2: ec2Client,
+			STS: stsClient,
 		}
 
-		var wg sync.WaitGroup
-		var tableRows []table.Row
-		var handleSnapshots []snapshotWithTags
-		var handleVolumesIDs []volumeWithTags
-
-		snapshotChan := make(chan snapshotWithTags, 500)
-		volumeIDsChan := make(chan volumeWithTags, 500)
-		tableRowChan := make(chan *table.Row, 100)
-		errorChan := make(chan error, 1)
-		doneChan := make(chan struct{})
-
-		// Start a goroutine to process volumes
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("Starting volume processing goroutine")
-			if err := describeVolumes(ctx, ec2Client, volumeIDsChan, []types.Filter{}); err != nil {
-				errorChan <- err
-				close(volumeIDsChan)
-				return
-			}
-			// Close the channel after sending all snapshots
-			for volumeWithTags := range volumeIDsChan {
-				handleVolumesIDs = append(handleVolumesIDs, volumeWithTags)
-			}
-			fmt.Println("Volumes processed:", len(handleVolumesIDs))
-			fmt.Println("Volume processing goroutine done")
-		}()
-
-		// Start a goroutine to process snapshots
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("Starting snapshots processing goroutine")
-			filter := []types.Filter{
-				{
-					Name:   aws.String("owner-id"),
-					Values: []string{*selfAccount.Account},
-				},
-				{
-					Name:   aws.String("tag:Name"),
-					Values: []string{flagValues["filter-by-name"].(string)},
-				},
-			}
-			if err := describeSnapshots(ctx, ec2Client, snapshotChan, filter); err != nil {
-				errorChan <- err
-				return
-			}
-			for snapshotWithTags := range snapshotChan {
-				handleSnapshots = append(handleSnapshots, snapshotWithTags)
-			}
-			fmt.Println("Snapshots processed:", len(handleSnapshots))
-			fmt.Println("Snapshots processing goroutine done")
-		}()
-
-		// Start a goroutine to wait for all processing to complete
-		go func() {
-			wg.Wait()
-			fmt.Println("Wait group done")
-			close(doneChan)
-		}()
-
-		for {
-			select {
-			case err := <-errorChan:
-				logger.LogError("Error during loadbalancer processing", err, nil, true)
-				return
-			case <-doneChan:
-				defer close(tableRowChan)
-				fmt.Println("Processing done")
-				fmt.Println("Snapshots processed:", len(handleSnapshots))
-				fmt.Println("Volumes processed:", len(handleVolumesIDs))
-				handlerSnapshot(handleVolumesIDs, handleSnapshots, tableRowChan)
-				for row := range tableRowChan {
-					tableRows = append(tableRows, *row)
-					fmt.Println("Row added")
-					fmt.Println("Row:", *row)
-				}
-				columnConfig := []table.ColumnConfig{
-					{Name: "Name", AlignHeader: text.AlignCenter},
-					{Name: "Snapshot ID", AlignHeader: text.AlignCenter},
-					{Name: "Size", AlignHeader: text.AlignCenter},
-				}
-
-				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
-
-				if err := printerClient.PrintTextTable(&tableRows); err != nil {
-					logger.LogError("Error printing table", err, nil, false)
-				}
-			}
-		}
+		return runSnapshotCmd(ctx, prompterClient, output, *awsClient, flagValues)
 	},
+}
+
+func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues map[string]interface{}) error {
+
+	// Create a new logger and error handler
+	logger := logging.NewLogger()
+
+	// Create an instance of elbv2Command
+	snapshotCmd := &AWSCommand{
+		AWSClient: awsClient,
+		Logger:    logger,
+		Prompter:  prompter,
+		Output:    output,
+	}
+
+	return snapshotCmd.executeSnapShot(ctx, flagValues)
+}
+
+func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues map[string]interface{}) error {
+	// Create channels to send snapshots and volumes
+	snapshotChan := make(chan snapshotWithTags, 500)
+	volumeIDsChan := make(chan volumeWithTags, 500)
+	tableRowChan := make(chan *table.Row, 100)
+	errorChan := make(chan error, 1)
+	doneChan := make(chan struct{})
+
+	selfAccount, err := s.AWSClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		s.Logger.LogError("Failed loading AWS client config", err, nil, false)
+		errorChan <- err
+	}
+
+	var wg sync.WaitGroup
+	var tableRows []table.Row
+	var handleSnapshots []snapshotWithTags
+	var handleVolumesIDs []volumeWithTags
+
+	// Start a goroutine to process volumes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.DescribeVolumes(ctx, volumeIDsChan, []types.Filter{}); err != nil {
+			errorChan <- err
+			return
+		}
+		// Close the channel after sending all snapshots
+		for volumeWithTags := range volumeIDsChan {
+			// fmt.Println(*volumeWithTags.Volume.VolumeId)
+			handleVolumesIDs = append(handleVolumesIDs, volumeWithTags)
+		}
+	}()
+
+	// Start a goroutine to process snapshots
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		filter := []types.Filter{
+			{
+				Name:   aws.String("owner-id"),
+				Values: []string{*selfAccount.Account},
+			},
+			{
+				Name:   aws.String("tag:Name"),
+				Values: []string{flagValues["filter-by-name"].(string)},
+			},
+		}
+		if err := s.describeSnapshots(ctx, snapshotChan, filter); err != nil {
+			errorChan <- err
+			return
+		}
+		for snapshotWithTags := range snapshotChan {
+			handleSnapshots = append(handleSnapshots, snapshotWithTags)
+		}
+	}()
+
+	// Start a goroutine to wait for all processing to complete
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	for {
+		select {
+		case err := <-errorChan:
+			// s.Logger.LogError("Error during snapshot processing", err, nil, false)
+			return err
+		case <-doneChan:
+			defer close(tableRowChan)
+			if err := handlerSnapshot(ctx, handleVolumesIDs, handleSnapshots, tableRowChan); err != nil {
+				s.Logger.LogError("Error handling snapshots", err, nil, false)
+				errorChan <- err
+			}
+			for row := range tableRowChan {
+				tableRows = append(tableRows, *row)
+			}
+
+			// Print the volume table
+			if err := printSnapshotTable(&tableRows); err != nil {
+				s.Logger.LogError("Error printing volume table", err, nil, false)
+				errorChan <- err
+			}
+			return nil
+		case <-ctx.Done():
+			s.Logger.LogInfo("Operation canceled", nil)
+			return ctx.Err()
+		}
+	}
 }
 
 func init() {
@@ -189,74 +210,115 @@ func init() {
 	snapshotsCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ).")
 }
 
-func describeSnapshots(ctx context.Context, client *ec2.Client, snapshotChan chan<- snapshotWithTags, filter []types.Filter) error {
+// describeSnapshots returns a list of snapshots owned by the account
+func (s *AWSCommand) describeSnapshots(ctx context.Context, snapshotChan chan<- snapshotWithTags, filter []types.Filter) error {
+	defer close(snapshotChan)
+
 	// Create a paginator for Snapshots owned by self
-	fmt.Println("Starting describeSnapshots")
-	paginator := ec2.NewDescribeSnapshotsPaginator(client, &ec2.DescribeSnapshotsInput{
+	paginator := ec2.NewDescribeSnapshotsPaginator(s.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
 		MaxResults: aws.Int32(500),
 		Filters:    filter,
 	})
 
 	// Iterate over the pages
 	for paginator.HasMorePages() {
-		output, err := paginator.NextPage(ctx)
-		if err != nil {
-			close(snapshotChan)
-			return err
-		}
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return err
+			}
 
-		// Send snapshots to the channel
-		for _, snapshot := range output.Snapshots {
-			tagMap := utils.TagsToMap(snapshot.Tags)
-			snapshotChan <- snapshotWithTags{Snapshot: snapshot, TagMap: tagMap}
+			// Send snapshots to the channel
+			for _, snapshot := range page.Snapshots {
+				// Convert tags to a map
+				tagMap := utils.TagsToMap(snapshot.Tags)
+
+				select {
+				case snapshotChan <- snapshotWithTags{Snapshot: snapshot, TagMap: tagMap}:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
 		}
 	}
-	close(snapshotChan)
-	fmt.Println("Finished describeSnapshots")
 	return nil
 }
 
-func handlerSnapshot(handleVolumesIDs []volumeWithTags, handleSnapshots []snapshotWithTags, tableRowChan chan<- *table.Row) {
-	fmt.Println("Starting handlerSnapshot")
+// handlerSnapshot processes the snapshots and volumes
+func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, handleSnapshots []snapshotWithTags, tableRowChan chan<- *table.Row) error {
+	defer close(tableRowChan)
+
+	// Create a map to store the volume IDs
 	volumeSnapshotID := make(map[string]bool)
-
-	fmt.Println("Snapshots processed:", len(handleSnapshots))
-	// fmt.Println("Snapshots:", handleSnapshots)
-
-	fmt.Println("Volumes processed:", len(handleVolumesIDs))
-	// fmt.Println("Volumes:", handleVolumesIDs)
 
 	// Create a slice to store the total size of all volumes
 	size := int32(0)
 	// Process volume IDs
-	for _, volumeWithTags := range handleVolumesIDs {
-		snapshotID := volumeWithTags.Volume.SnapshotId
-		if strings.Contains(*snapshotID, "snap") {
-			volumeSnapshotID[*snapshotID] = true
-		}
-		volumeSnapshotID[*snapshotID] = false
-	}
-
-	for _, snapshotWithTags := range handleSnapshots {
-		snapshotVolumeID := snapshotWithTags.Snapshot.VolumeId
-		snapshotSize := snapshotWithTags.Snapshot.VolumeSize
-		tagMap := snapshotWithTags.TagMap
-		nameTag, ok := tagMap["Name"]
-		if !ok {
-			nameTag = types.Tag{Value: aws.String("-")}
-		}
-
-		// if !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created by CreateImage") || !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created for policy") {
-		if volumeSnapshotID[*snapshotWithTags.Snapshot.SnapshotId] {
-			tableRowChan <- &table.Row{
-				*nameTag.Value,
-				*snapshotVolumeID,
-				*snapshotSize,
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		for _, volumeWithTags := range handleVolumesIDs {
+			snapshotID := volumeWithTags.Volume.SnapshotId
+			if strings.Contains(*snapshotID, "snap") {
+				volumeSnapshotID[*snapshotID] = true
 			}
-			size += *snapshotSize
+			volumeSnapshotID[*snapshotID] = false
 		}
-		// }
+
+		for _, snapshotWithTags := range handleSnapshots {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				snapshotVolumeID := snapshotWithTags.Snapshot.VolumeId
+				snapshotSize := snapshotWithTags.Snapshot.VolumeSize
+				tagMap := snapshotWithTags.TagMap
+				nameTag, ok := tagMap["Name"]
+				if !ok {
+					nameTag = types.Tag{Value: aws.String("-")}
+				}
+
+				if !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created by CreateImage") || !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created for policy") {
+					if volumeSnapshotID[*snapshotWithTags.Snapshot.SnapshotId] {
+						tableRowChan <- &table.Row{
+							*nameTag.Value,
+							*snapshotVolumeID,
+							*snapshotSize,
+						}
+						size += *snapshotSize
+					}
+				}
+			}
+			tableRowChan <- &table.Row{"Total", "", size}
+		}
 	}
-	tableRowChan <- &table.Row{"Total", "", size}
-	// close(tableRowChan)
+	return nil
+}
+
+// printSnapshotTable prints the snapshot table
+func printSnapshotTable(tableRows *[]table.Row) error {
+
+	columnConfig := []table.ColumnConfig{
+		{
+			Name:        "Name",
+			AlignHeader: text.AlignCenter,
+		},
+		{
+			Name:        "Snapshot ID",
+			AlignHeader: text.AlignCenter,
+		},
+		{
+			Name:        "Size",
+			AlignHeader: text.AlignCenter,
+		},
+	}
+
+	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
+
+	return printerClient.PrintTextTable(tableRows)
 }
