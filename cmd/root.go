@@ -10,8 +10,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/promter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -76,7 +79,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentials file profile")
 	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication methos AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
 	rootCmd.PersistentFlags().Bool("delete", false, "Delete Orphant resources")
-	rootCmd.PersistentFlags().Duration("timeout", 300, "Timeout in seconds for the command execution.")
+	rootCmd.PersistentFlags().Duration("timeout", 0, "Timeout in seconds for the command execution.")
 
 	// imagesCmd.PersistentFlags().String("creation-date", "", "The time when the image was created, in the ISO 8601 format in the UTC time zone (YYYY-MM-DDThh:mm:ss.sssZ), for example, 2021-09-29T11:04:43.305Z . You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day")
 
@@ -112,4 +115,12 @@ func initConfig() {
 // GetRootCommand returns the root command
 func GetRootCommand() *cobra.Command {
 	return rootCmd
+}
+
+// printTable prints the commands table
+func printTable(columnConfig *[]table.ColumnConfig, tableHeader *table.Row, tableRows *[]table.Row, sort *[]table.SortBy) error {
+
+	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), tableHeader, sort, columnConfig)
+
+	return printerClient.PrintTextTable(tableRows)
 }

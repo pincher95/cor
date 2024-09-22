@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -16,27 +17,33 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-type AWSClient interface {
-	EC2Client
-	ELBV2Client
-}
+// type AWSClientInterface interface {
+// 	EC2Client
+// 	ELBV2Client
+// 	STSClient
+// }
 
-// EC2Client is the interface for the ec2 client
-type EC2Client interface {
-	DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
-	DeleteVolume(ctx context.Context, pamams *ec2.DeleteVolumeInput, optFns ...func(*ec2.Options)) (*ec2.DeleteVolumeOutput, error)
-}
+// // EC2Client is the interface for the ec2 client
+// type EC2Client interface {
+// 	DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error)
+// 	DeleteVolume(ctx context.Context, pamams *ec2.DeleteVolumeInput, optFns ...func(*ec2.Options)) (*ec2.DeleteVolumeOutput, error)
+// }
 
-// ELBV2Client is an interface that defines the methods used from the AWS SDK.
-type ELBV2Client interface {
-	DescribeLoadBalancers(ctx context.Context, params *elasticloadbalancingv2.DescribeLoadBalancersInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error)
-	DescribeTargetGroups(ctx context.Context, params *elasticloadbalancingv2.DescribeTargetGroupsInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error)
-	DescribeTargetHealth(ctx context.Context, params *elasticloadbalancingv2.DescribeTargetHealthInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetHealthOutput, error)
-	DescribeListeners(ctx context.Context, params *elasticloadbalancingv2.DescribeListenersInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeListenersOutput, error)
-	DeleteListener(ctx context.Context, params *elasticloadbalancingv2.DeleteListenerInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteListenerOutput, error)
-	DeleteTargetGroup(ctx context.Context, params *elasticloadbalancingv2.DeleteTargetGroupInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteTargetGroupOutput, error)
-	DeleteLoadBalancer(ctx context.Context, params *elasticloadbalancingv2.DeleteLoadBalancerInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteLoadBalancerOutput, error)
-}
+// // ELBV2Client is an interface that defines the methods used from the AWS SDK.
+// type ELBV2Client interface {
+// 	DescribeLoadBalancers(ctx context.Context, params *elasticloadbalancingv2.DescribeLoadBalancersInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error)
+// 	DescribeTargetGroups(ctx context.Context, params *elasticloadbalancingv2.DescribeTargetGroupsInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error)
+// 	DescribeTargetHealth(ctx context.Context, params *elasticloadbalancingv2.DescribeTargetHealthInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetHealthOutput, error)
+// 	DescribeListeners(ctx context.Context, params *elasticloadbalancingv2.DescribeListenersInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeListenersOutput, error)
+// 	DeleteListener(ctx context.Context, params *elasticloadbalancingv2.DeleteListenerInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteListenerOutput, error)
+// 	DeleteTargetGroup(ctx context.Context, params *elasticloadbalancingv2.DeleteTargetGroupInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteTargetGroupOutput, error)
+// 	DeleteLoadBalancer(ctx context.Context, params *elasticloadbalancingv2.DeleteLoadBalancerInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteLoadBalancerOutput, error)
+// 	DescribeListenersPaginator(ctx context.Context, params *elasticloadbalancingv2.DescribeListenersInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeListenersPaginator, error)
+// }
+
+// type STSClient interface {
+// 	GetCallerIdentity(ctx context.Context, params *sts.GetCallerIdentityInput, optFns ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error)
+// }
 
 type AWSClientImpl struct {
 	EC2 *ec2.Client
@@ -156,11 +163,7 @@ func NewConfigV2(ctx context.Context, cloudConfig CloudConfig, timezone string, 
 
 // AWS credential file authentication
 func authenticateAWSCredentialsFile(ctx context.Context, region string, profile string) (*aws.Config, error) {
-	// cfg, err := config.LoadDefaultConfig(ctx,
-	// 	config.WithRegion(region),
-	// 	config.WithSharedConfigProfile(profile),
-	// )
-
+	// Load the default config
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
 		config.WithSharedConfigProfile(profile),
@@ -173,13 +176,25 @@ func authenticateAWSCredentialsFile(ctx context.Context, region string, profile 
 				// o.RetryCost = 1
 				// o.RetryTimeoutCost = 3
 				// o.NoRetryIncrement = 10
-				o.MaxAttempts = 20
+				o.MaxAttempts = 10
 				o.MaxBackoff = 300 * time.Millisecond
-
 			})
 		}),
+		config.WithHTTPClient(&http.Client{
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 100,
+				MaxConnsPerHost:     10,
+			},
+			Timeout: 30 * time.Second,
+		}),
 	)
+
 	if err != nil {
+		// Check if the error relates to expired credentials by calling sts GetCallerIdentity
+		if stsErr := checkIfExpired(ctx, cfg); stsErr != nil {
+			fmt.Fprintln(os.Stderr, "AWS credentials have expired. Please refresh your credentials.")
+			os.Exit(1)
+		}
 		return nil, err
 	}
 	return &cfg, nil
@@ -195,6 +210,13 @@ func authenticateEnvSecret(ctx context.Context, region string) (*aws.Config, err
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// Function to check if credentials are expired by making a simple call to STS
+func checkIfExpired(ctx context.Context, cfg aws.Config) error {
+	stsSvc := sts.NewFromConfig(cfg)
+	_, err := stsSvc.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	return err
 }
 
 // Confirmation asks user for confirmation.

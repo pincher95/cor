@@ -17,7 +17,6 @@ import (
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/promter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
@@ -49,10 +48,6 @@ var volumesCmd = &cobra.Command{
 				Name: "filter-by-name",
 				Type: "string",
 			},
-			{
-				Name: "delete",
-				Type: "bool",
-			},
 		}
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
@@ -61,9 +56,9 @@ var volumesCmd = &cobra.Command{
 		}
 
 		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String(flagValues["auth-method"].(string)),
-			Profile:    aws.String(flagValues["profile"].(string)),
-			Region:     aws.String(flagValues["region"].(string)),
+			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
+			Profile:    aws.String((*flagValues)["profile"].(string)),
+			Region:     aws.String((*flagValues)["region"].(string)),
 		}
 
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
@@ -78,29 +73,24 @@ var volumesCmd = &cobra.Command{
 			EC2: ec2Client,
 		}
 
-		return runVolumeCmd(ctx, prompterClient, output, *awsClient, flagValues)
+		return runVolumeCmd(ctx, &prompterClient, output, awsClient, flagValues)
 	},
 }
 
-func runVolumeCmd(ctx context.Context, prompter promter.Client, output io.Writer, ec2Client handlers.AWSClientImpl, flagValues map[string]interface{}) error {
-
-	// Create a new logger and error handler
-	logger := logging.NewLogger()
-
+func runVolumeCmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]interface{}) error {
 	// Create an instance of elbv2Command
 	elbCmd := &AWSCommand{
-		AWSClient: ec2Client,
-		Logger:    logger,
-		Prompter:  prompter,
+		AWSClient: *awsClient,
+		Logger:    logging.NewLogger(),
+		Prompter:  *prompter,
 		Output:    output,
 	}
 
 	return elbCmd.executeELB(ctx, flagValues)
 }
 
-func (v *AWSCommand) executeELB(ctx context.Context, flagValues map[string]interface{}) error {
+func (v *AWSCommand) executeELB(ctx context.Context, flagValues *map[string]interface{}) error {
 	// Create a channel to process volumes concurrently
-	// volumeChan := make(chan volumeWithTags, 10)
 	volumeWithTagsChan := make(chan volumeWithTags, 10)
 	errorChan := make(chan error, 1)
 	doneChan := make(chan struct{})
@@ -118,10 +108,10 @@ func (v *AWSCommand) executeELB(ctx context.Context, flagValues map[string]inter
 			},
 			{
 				Name:   aws.String("tag:Name"),
-				Values: []string{flagValues["filter-by-name"].(string)},
+				Values: []string{(*flagValues)["filter-by-name"].(string)},
 			},
 		}
-		if err := v.DescribeVolumes(ctx, volumeWithTagsChan, volumeFilter); err != nil {
+		if err := v.DescribeVolumes(ctx, volumeWithTagsChan, &volumeFilter); err != nil {
 			errorChan <- err
 			return
 		}
@@ -174,7 +164,7 @@ func (v *AWSCommand) executeELB(ctx context.Context, flagValues map[string]inter
 			}
 
 			// Handle volume deletion based on flag
-			if flagValues["delete"].(bool) {
+			if (*flagValues)["delete"].(bool) {
 				if err := v.deleteVolumes(ctx, &tableRows); err != nil {
 					return err
 				}
@@ -234,12 +224,17 @@ func (v *AWSCommand) deleteVolumes(ctx context.Context, tableRows *[]table.Row) 
 }
 
 // DescribeVolumes describes the volumes based on the filter provided
-func (v *AWSCommand) DescribeVolumes(ctx context.Context, volumeWithTagsChan chan<- volumeWithTags, filter []types.Filter) error {
+func (v *AWSCommand) DescribeVolumes(ctx context.Context, volumeWithTagsChan chan<- volumeWithTags, filters *[]types.Filter) error {
 	defer close(volumeWithTagsChan)
+
+	// If filters are nil, create an empty filter
+	if filters == nil {
+		filters = &[]types.Filter{}
+	}
 
 	// Create a paginator
 	paginator := ec2.NewDescribeVolumesPaginator(v.AWSClient.EC2, &ec2.DescribeVolumesInput{
-		Filters: filter,
+		Filters: *filters,
 	})
 
 	// Iterate over the pages
@@ -295,7 +290,5 @@ func printVolumeTable(tableRows *[]table.Row) error {
 		},
 	}
 
-	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
-
-	return printerClient.PrintTextTable(tableRows)
+	return printTable(&columnConfig, &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
 }

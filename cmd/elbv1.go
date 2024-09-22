@@ -42,9 +42,9 @@ var elbv1Cmd = &cobra.Command{
 		}
 
 		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String(flagValues["auth-method"].(string)),
-			Profile:    aws.String(flagValues["profile"].(string)),
-			Region:     aws.String(flagValues["region"].(string)),
+			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
+			Profile:    aws.String((*flagValues)["profile"].(string)),
+			Region:     aws.String((*flagValues)["region"].(string)),
 		}
 
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)

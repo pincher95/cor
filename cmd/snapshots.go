@@ -19,7 +19,6 @@ import (
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/promter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
@@ -52,10 +51,6 @@ var snapshotsCmd = &cobra.Command{
 				Name: "filter-by-name",
 				Type: "string",
 			},
-			{
-				Name: "delete",
-				Type: "bool",
-			},
 		}
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
@@ -64,9 +59,9 @@ var snapshotsCmd = &cobra.Command{
 		}
 
 		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String(flagValues["auth-method"].(string)),
-			Profile:    aws.String(flagValues["profile"].(string)),
-			Region:     aws.String(flagValues["region"].(string)),
+			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
+			Profile:    aws.String((*flagValues)["profile"].(string)),
+			Region:     aws.String((*flagValues)["region"].(string)),
 		}
 
 		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
@@ -88,7 +83,7 @@ var snapshotsCmd = &cobra.Command{
 	},
 }
 
-func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues map[string]interface{}) error {
+func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues *map[string]interface{}) error {
 
 	// Create a new logger and error handler
 	logger := logging.NewLogger()
@@ -104,7 +99,7 @@ func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writ
 	return snapshotCmd.executeSnapShot(ctx, flagValues)
 }
 
-func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues map[string]interface{}) error {
+func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]interface{}) error {
 	// Create channels to send snapshots and volumes
 	snapshotChan := make(chan snapshotWithTags, 500)
 	volumeIDsChan := make(chan volumeWithTags, 500)
@@ -127,13 +122,12 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues map[string]
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.DescribeVolumes(ctx, volumeIDsChan, []types.Filter{}); err != nil {
+		if err := s.DescribeVolumes(ctx, volumeIDsChan, nil); err != nil {
 			errorChan <- err
 			return
 		}
 		// Close the channel after sending all snapshots
 		for volumeWithTags := range volumeIDsChan {
-			// fmt.Println(*volumeWithTags.Volume.VolumeId)
 			handleVolumesIDs = append(handleVolumesIDs, volumeWithTags)
 		}
 	}()
@@ -149,7 +143,7 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues map[string]
 			},
 			{
 				Name:   aws.String("tag:Name"),
-				Values: []string{flagValues["filter-by-name"].(string)},
+				Values: []string{(*flagValues)["filter-by-name"].(string)},
 			},
 		}
 		if err := s.describeSnapshots(ctx, snapshotChan, filter); err != nil {
@@ -173,7 +167,7 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues map[string]
 			// s.Logger.LogError("Error during snapshot processing", err, nil, false)
 			return err
 		case <-doneChan:
-			defer close(tableRowChan)
+			close(tableRowChan)
 			if err := handlerSnapshot(ctx, handleVolumesIDs, handleSnapshots, tableRowChan); err != nil {
 				s.Logger.LogError("Error handling snapshots", err, nil, false)
 				errorChan <- err
@@ -318,7 +312,5 @@ func printSnapshotTable(tableRows *[]table.Row) error {
 		},
 	}
 
-	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"Name", "Snapshot ID", "Size"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
-
-	return printerClient.PrintTextTable(tableRows)
+	return printTable(&columnConfig, &table.Row{"Name", "Snapshot ID", "Size"}, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
 }
