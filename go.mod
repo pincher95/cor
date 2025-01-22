@@ -12,6 +12,8 @@ require (
 	github.com/spf13/viper v1.19.0
 )
 
+require github.com/google/pprof v0.0.0-20240227163752-401108e1b7e7 // indirect
+
 require (
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.11 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.17 // indirect
@@ -25,6 +27,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.26.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.30.3
 	github.com/aws/smithy-go v1.20.4
+	github.com/felixge/fgprof v0.9.5
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

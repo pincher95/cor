@@ -172,20 +172,20 @@ func authenticateAWSCredentialsFile(ctx context.Context, region string, profile 
 				// Makes the rate limiter more permissive in general. These values are
 				// arbitrary for demonstration and may not suit your specific
 				// application's needs.
-				o.RateLimiter = ratelimit.NewTokenRateLimit(1000)
-				// o.RetryCost = 1
-				// o.RetryTimeoutCost = 3
-				// o.NoRetryIncrement = 10
-				o.MaxAttempts = 10
-				o.MaxBackoff = 300 * time.Millisecond
+				o.RateLimiter = ratelimit.NewTokenRateLimit(200)
+				o.RetryCost = 2         // Cost per retry
+				o.RetryTimeoutCost = 4  // Additional cost for timeout retries
+				o.NoRetryIncrement = 20 // Adds to retry quota for successful calls
+				o.MaxAttempts = 15
+				o.MaxBackoff = 2 * time.Second // Increase for better throttling tolerance
 			})
 		}),
 		config.WithHTTPClient(&http.Client{
 			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 100,
-				MaxConnsPerHost:     10,
+				MaxIdleConnsPerHost: 200,
+				MaxConnsPerHost:     50,
 			},
-			Timeout: 30 * time.Second,
+			Timeout: 60 * time.Second,
 		}),
 	)
 

@@ -193,7 +193,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]i
 			}
 
 			// Print the image table
-			if err := printImageTable(&tableRows); err != nil {
+			if err := printImageTable(&tableRows, flagValues); err != nil {
 				i.Logger.LogError("Error printing table", err, nil, false)
 				errorChan <- err
 			}
@@ -510,7 +510,7 @@ func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, fla
 		// Only add if the image is NOT used by instances or launch templates
 		if len(usedByInstances) == 0 && len(usedByLaunchTemplates) == 0 {
 			resultsChan <- table.Row{
-				*image.Name, *image.ImageId, *image.CreationDate, strings.Join(snapshotIds, "\n"), "", ""}
+				*image.Name, *image.ImageId, *image.CreationDate, strings.Join(snapshotIds, "\n")}
 		}
 	}
 
@@ -518,7 +518,7 @@ func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, fla
 	if (*flagValues)["include-used-by-instance"].(bool) && !(*flagValues)["include-used-by-launch-template"].(bool) {
 		if len(usedByInstances) > 0 || (len(usedByInstances) == 0 && len(usedByLaunchTemplates) == 0) {
 			resultsChan <- table.Row{
-				*image.Name, *image.ImageId, *image.CreationDate, strings.Join(snapshotIds, "\n"), strings.Join(usedByInstances, "\n"), ""}
+				*image.Name, *image.ImageId, *image.CreationDate, strings.Join(snapshotIds, "\n"), strings.Join(usedByInstances, "\n")}
 		}
 	}
 
@@ -526,7 +526,7 @@ func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, fla
 	if (*flagValues)["include-used-by-launch-template"].(bool) && !(*flagValues)["include-used-by-instance"].(bool) {
 		if len(usedByLaunchTemplates) > 0 || (len(usedByInstances) == 0 && len(usedByLaunchTemplates) == 0) {
 			resultsChan <- table.Row{
-				*image.Name, *image.ImageId, *image.CreationDate, strings.Join(snapshotIds, "\n"), "", strings.Join(usedByLaunchTemplates, "\n")}
+				*image.Name, *image.ImageId, *image.CreationDate, strings.Join(snapshotIds, "\n"), strings.Join(usedByLaunchTemplates, "\n")}
 		}
 	}
 
@@ -545,7 +545,7 @@ func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, fla
 func getSnapshotIds(image ec2types.Image) []string {
 	snapshotIds := make([]string, 0, len(image.BlockDeviceMappings))
 	for _, mapping := range image.BlockDeviceMappings {
-		if mapping.Ebs != nil {
+		if mapping.Ebs != nil && mapping.Ebs.SnapshotId != nil {
 			snapshotIds = append(snapshotIds, *mapping.Ebs.SnapshotId)
 		}
 	}
@@ -553,9 +553,10 @@ func getSnapshotIds(image ec2types.Image) []string {
 }
 
 // printVolumeTable prints the volume table
-func printImageTable(tableRows *[]table.Row) error {
+func printImageTable(tableRows *[]table.Row, flagValues *map[string]interface{}) error {
 
-	columnConfig := []table.ColumnConfig{
+	tableRowHeader := table.Row{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance", "used by Launch Template"}
+	tableColumnConfig := []table.ColumnConfig{
 		{
 			Name:        "ami name",
 			AlignHeader: text.AlignCenter,
@@ -582,7 +583,84 @@ func printImageTable(tableRows *[]table.Row) error {
 		},
 	}
 
-	return printTable(&columnConfig, &table.Row{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance", "used by Launch Template"}, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
+	if !(*flagValues)["include-used-by-instance"].(bool) && !(*flagValues)["include-used-by-launch-template"].(bool) {
+		// Only add if the image is NOT used by instances or launch templates
+		tableRowHeader = table.Row{"ami name", "ami id", "creation date", "snapshot ids"}
+		tableColumnConfig = []table.ColumnConfig{
+			{
+				Name:        "ami name",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "ami id",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "creation date",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "snapshot ids",
+				AlignHeader: text.AlignCenter,
+			},
+		}
+	}
+
+	if (*flagValues)["include-used-by-instance"].(bool) && !(*flagValues)["include-used-by-launch-template"].(bool) {
+		// Only add if the image is used by instances and NOT launch templates
+		tableRowHeader = table.Row{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance"}
+		tableColumnConfig = []table.ColumnConfig{
+			{
+				Name:        "ami name",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "ami id",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "creation date",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "snapshot ids",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "used by Instance",
+				AlignHeader: text.AlignCenter,
+			},
+		}
+	}
+
+	if !(*flagValues)["include-used-by-instance"].(bool) && (*flagValues)["include-used-by-launch-template"].(bool) {
+		// Only add if the image is used by launch templates and NOT used by instances
+		tableRowHeader = table.Row{"ami name", "ami id", "creation date", "snapshot ids", "used by Launch Template"}
+		tableColumnConfig = []table.ColumnConfig{
+			{
+				Name:        "ami name",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "ami id",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "creation date",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "snapshot ids",
+				AlignHeader: text.AlignCenter,
+			},
+			{
+				Name:        "used by Launch Template",
+				AlignHeader: text.AlignCenter,
+			},
+		}
+	}
+
+	return printTable(&tableColumnConfig, &tableRowHeader, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
 }
 
 // func getInstances(instanceChan <-chan ec2types.Instance, imageID *string) []string {

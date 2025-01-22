@@ -5,14 +5,24 @@ package main
 
 import (
 	"context"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/felixge/fgprof"
 	"github.com/pincher95/cor/cmd"
 )
 
 func main() {
+
+	http.DefaultServeMux.Handle("/debug/fgprof", fgprof.Handler())
+	go func() {
+		log.Println(http.ListenAndServe(":6060", nil))
+	}()
+
 	// logger := logging.NewLogger()
 	// rootCmd := cmd.GetRootCommand()
 

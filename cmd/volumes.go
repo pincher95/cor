@@ -27,6 +27,11 @@ type volumeWithTags struct {
 	TagMap map[string]types.Tag
 }
 
+type volumeResult struct {
+	row  table.Row
+	size int32
+}
+
 // volumesListCmd represents the volumes command
 var volumesCmd = &cobra.Command{
 	Use:   "volumes",
@@ -93,14 +98,12 @@ func (v *AWSCommand) executeELB(ctx context.Context, flagValues *map[string]inte
 	// Create a channel to process volumes concurrently
 	volumeWithTagsChan := make(chan volumeWithTags, 10)
 	errorChan := make(chan error, 1)
-	doneChan := make(chan struct{})
+	// doneChan := make(chan struct{})
+	resultsChan := make(chan volumeResult, 10)
 
-	// Create a wait group
-	var wg sync.WaitGroup
-
-	wg.Add(1)
+	// wg.Add(1)
 	go func() {
-		defer wg.Done()
+		// Create a filter for the volumes
 		volumeFilter := []types.Filter{
 			{
 				Name:   aws.String("status"),
@@ -117,10 +120,38 @@ func (v *AWSCommand) executeELB(ctx context.Context, flagValues *map[string]inte
 		}
 	}()
 
+	// Start worker goroutines to process volumes
+	numWorkers := 10
+	// Create a wait group
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for volume := range volumeWithTagsChan {
+				// Process the volume
+				volumeWithTags, err := handleVolume(volume)
+				if err != nil {
+					errorChan <- err
+					return
+				}
+				row := table.Row{
+					*volumeWithTags.TagMap["Name"].Value,
+					*volumeWithTags.Volume.VolumeId,
+					*volumeWithTags.Volume.SnapshotId,
+					*volumeWithTags.Volume.Size,
+				}
+				// Send the result struct to resultsChan
+				resultsChan <- volumeResult{row: row, size: *volumeWithTags.Volume.Size}
+			}
+		}()
+	}
+
 	// Wait for all goroutines to finish
 	go func() {
 		wg.Wait()
-		close(doneChan)
+		close(resultsChan)
 	}()
 
 	// Dynamically collect results and process them in a select loop
@@ -133,43 +164,30 @@ func (v *AWSCommand) executeELB(ctx context.Context, flagValues *map[string]inte
 		case err := <-errorChan:
 			v.Logger.LogError("Error during volume processing", err, nil, false)
 			return err
-		case <-doneChan:
-			// Process volume and accumulate results
-			for volume := range volumeWithTagsChan {
-				volumeWithTags, err := handleVolume(volume)
-				if err != nil {
-					v.Logger.LogError("Error handling volume", err, nil, false)
+		case res, ok := <-resultsChan:
+			if ok {
+				tableRows = append(tableRows, res.row)
+				totalSize += res.size
+			} else {
+				// All processing is done
+				tableRows = append(tableRows, table.Row{"", "", "", totalSize, "Total"})
+				// Print the volume table
+				if err := printVolumeTable(&tableRows); err != nil {
+					v.Logger.LogError("Error printing volume table", err, nil, false)
 					return err
 				}
-
-				// Append each processed volume row
-				tableRows = append(tableRows, table.Row{
-					*volumeWithTags.TagMap["Name"].Value,
-					*volumeWithTags.Volume.VolumeId,
-					*volumeWithTags.Volume.SnapshotId,
-					*volumeWithTags.Volume.Size,
-				})
-
-				// Keep track of the total size
-				totalSize += *volumeWithTags.Volume.Size
-			}
-
-			// When done, add the total row and break out of the loop
-			tableRows = append(tableRows, table.Row{"", "", "", totalSize, "Total"})
-
-			// Print the volume table
-			if err := printVolumeTable(&tableRows); err != nil {
-				v.Logger.LogError("Error printing volume table", err, nil, false)
-				errorChan <- err
-			}
-
-			// Handle volume deletion based on flag
-			if (*flagValues)["delete"].(bool) {
-				if err := v.deleteVolumes(ctx, &tableRows); err != nil {
-					return err
+				// Handle volume deletion based on flag
+				if (*flagValues)["delete"].(bool) {
+					if err := v.deleteVolumes(ctx, &tableRows); err != nil {
+						return err
+					}
 				}
+				return nil
 			}
-			return nil
+
+		case <-ctx.Done():
+			v.Logger.LogInfo("Operation canceled", nil)
+			return ctx.Err()
 		}
 	}
 }

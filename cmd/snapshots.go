@@ -167,7 +167,7 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string
 			// s.Logger.LogError("Error during snapshot processing", err, nil, false)
 			return err
 		case <-doneChan:
-			close(tableRowChan)
+			// close(tableRowChan)
 			if err := handlerSnapshot(ctx, handleVolumesIDs, handleSnapshots, tableRowChan); err != nil {
 				s.Logger.LogError("Error handling snapshots", err, nil, false)
 				errorChan <- err
@@ -216,27 +216,16 @@ func (s *AWSCommand) describeSnapshots(ctx context.Context, snapshotChan chan<- 
 
 	// Iterate over the pages
 	for paginator.HasMorePages() {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			page, err := paginator.NextPage(ctx)
-			if err != nil {
-				return err
-			}
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return err
+		}
 
-			// Send snapshots to the channel
-			for _, snapshot := range page.Snapshots {
-				// Convert tags to a map
-				tagMap := utils.TagsToMap(snapshot.Tags)
-
-				select {
-				case snapshotChan <- snapshotWithTags{Snapshot: snapshot, TagMap: tagMap}:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
+		// Send snapshots to the channel
+		for _, snapshot := range page.Snapshots {
+			// Convert tags to a map
+			tagMap := utils.TagsToMap(snapshot.Tags)
+			snapshotChan <- snapshotWithTags{Snapshot: snapshot, TagMap: tagMap}
 		}
 	}
 	return nil
@@ -244,7 +233,7 @@ func (s *AWSCommand) describeSnapshots(ctx context.Context, snapshotChan chan<- 
 
 // handlerSnapshot processes the snapshots and volumes
 func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, handleSnapshots []snapshotWithTags, tableRowChan chan<- *table.Row) error {
-	defer close(tableRowChan)
+	// defer close(tableRowChan)
 
 	// Create a map to store the volume IDs
 	volumeSnapshotID := make(map[string]bool)
