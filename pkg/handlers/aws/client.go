@@ -176,8 +176,8 @@ func authenticateAWSCredentialsFile(ctx context.Context, region string, profile 
 				o.RetryCost = 2         // Cost per retry
 				o.RetryTimeoutCost = 4  // Additional cost for timeout retries
 				o.NoRetryIncrement = 20 // Adds to retry quota for successful calls
-				o.MaxAttempts = 15
-				o.MaxBackoff = 2 * time.Second // Increase for better throttling tolerance
+				o.MaxAttempts = 20
+				o.MaxBackoff = 3 * time.Second // Increase for better throttling tolerance
 			})
 		}),
 		config.WithHTTPClient(&http.Client{
