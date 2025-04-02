@@ -83,7 +83,7 @@ var snapshotsCmd = &cobra.Command{
 	},
 }
 
-func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues *map[string]interface{}) error {
+func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues *map[string]any) error {
 
 	// Create a new logger and error handler
 	logger := logging.NewLogger()
@@ -99,7 +99,7 @@ func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writ
 	return snapshotCmd.executeSnapShot(ctx, flagValues)
 }
 
-func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]interface{}) error {
+func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]any) error {
 	// Create channels to send snapshots and volumes
 	snapshotChan := make(chan snapshotWithTags, 500)
 	volumeIDsChan := make(chan volumeWithTags, 500)
@@ -168,10 +168,12 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string
 			return err
 		case <-doneChan:
 			// close(tableRowChan)
-			if err := handlerSnapshot(ctx, handleVolumesIDs, handleSnapshots, tableRowChan); err != nil {
-				s.Logger.LogError("Error handling snapshots", err, nil, false)
-				errorChan <- err
-			}
+			go func() {
+				if err := handlerSnapshot(ctx, handleVolumesIDs, handleSnapshots, tableRowChan); err != nil {
+					s.Logger.LogError("Error handling snapshots", err, nil, false)
+					errorChan <- err
+				}
+			}()
 			for row := range tableRowChan {
 				tableRows = append(tableRows, *row)
 			}
@@ -233,7 +235,7 @@ func (s *AWSCommand) describeSnapshots(ctx context.Context, snapshotChan chan<- 
 
 // handlerSnapshot processes the snapshots and volumes
 func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, handleSnapshots []snapshotWithTags, tableRowChan chan<- *table.Row) error {
-	// defer close(tableRowChan)
+	defer close(tableRowChan)
 
 	// Create a map to store the volume IDs
 	volumeSnapshotID := make(map[string]bool)
@@ -249,8 +251,9 @@ func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, han
 			snapshotID := volumeWithTags.Volume.SnapshotId
 			if strings.Contains(*snapshotID, "snap") {
 				volumeSnapshotID[*snapshotID] = true
+			} else {
+				volumeSnapshotID[*snapshotID] = false
 			}
-			volumeSnapshotID[*snapshotID] = false
 		}
 
 		for _, snapshotWithTags := range handleSnapshots {
@@ -277,8 +280,8 @@ func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, han
 					}
 				}
 			}
-			tableRowChan <- &table.Row{"Total", "", size}
 		}
+		tableRowChan <- &table.Row{"Total", "", size}
 	}
 	return nil
 }

@@ -107,7 +107,7 @@ func NewConfig(authMethod string, profile string, region string, timezone string
 	case "ENV_SECRET":
 		return authenticateEnvSecret(ctx, region)
 	default:
-		return nil, fmt.Errorf("Unsupported authentication method")
+		return nil, fmt.Errorf("unsupported authentication method")
 	}
 
 	// stsClient := sts.NewFromConfig(*cfg)
@@ -133,7 +133,7 @@ func NewConfigV2(ctx context.Context, cloudConfig CloudConfig, timezone string, 
 	case "ENV_SECRET":
 		return authenticateEnvSecret(ctx, *cloudConfig.Region)
 	default:
-		return nil, fmt.Errorf("Unsupported authentication method")
+		return nil, fmt.Errorf("unsupported authentication method")
 	}
 
 	// stsClient := sts.NewFromConfig(*cfg)

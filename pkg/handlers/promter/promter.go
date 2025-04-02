@@ -30,20 +30,25 @@ type promter struct {
 }
 
 func (p *promter) Confirm(prompt string) (*bool, error) {
-	fmt.Fprint(p.Promter.output, prompt)
+	if _, err := fmt.Fprint(p.Promter.output, prompt); err != nil {
+		return nil, err
+	}
+
 	reader := bufio.NewReader(p.Promter.input)
 	response, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, err
 	}
 	response = strings.ToLower(strings.TrimSpace(response))
-	if response == "yes" || response == "y" {
+
+	switch response {
+	case "yes", "y":
 		result := true
 		return &result, nil
-	} else if response == "no" || response == "n" {
+	case "no", "n":
 		result := false
 		return &result, nil
+	default:
+		return nil, nil
 	}
-
-	return nil, nil
 }

@@ -125,7 +125,7 @@ func (v *AWSCommand) executeELB(ctx context.Context, flagValues *map[string]inte
 	// Create a wait group
 	var wg sync.WaitGroup
 
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
