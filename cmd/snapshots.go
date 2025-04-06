@@ -19,7 +19,7 @@ import (
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
-	"github.com/pincher95/cor/pkg/handlers/promter"
+	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -36,7 +36,7 @@ var snapshotsCmd = &cobra.Command{
 	Long:  ``,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Create prompter using the prompter package
-		prompterClient := promter.NewConsolePrompter(os.Stdin, os.Stdout)
+		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
 		output := os.Stdout
 
 		// Create a new context
@@ -83,7 +83,7 @@ var snapshotsCmd = &cobra.Command{
 	},
 }
 
-func runSnapshotCmd(ctx context.Context, prompter promter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues *map[string]any) error {
+func runSnapshotCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues *map[string]any) error {
 
 	// Create a new logger and error handler
 	logger := logging.NewLogger()

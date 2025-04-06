@@ -20,7 +20,7 @@ import (
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/promter"
+	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +31,7 @@ var elbv2Cmd = &cobra.Command{
 	Long:  ``,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Create prompter using the prompter package
-		prompterClient := promter.NewConsolePrompter(os.Stdin, os.Stdout)
+		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
 		output := os.Stdout
 
 		// Create a context
@@ -89,7 +89,7 @@ func init() {
 	elbv2Cmd.Flags().String("filter-by-name", "", "The name of the elbv2 which matches an entire day.")
 }
 
-func runElbv2Cmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
+func runElbv2Cmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	// Create an instance of elbv2Command
 	elbCmd := &AWSCommand{
 		AWSClient: *awsClient,

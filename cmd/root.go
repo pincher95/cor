@@ -15,7 +15,7 @@ import (
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/promter"
+	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -23,7 +23,7 @@ import (
 type AWSCommand struct {
 	AWSClient handlers.AWSClientImpl
 	Logger    *logging.Logger
-	Prompter  promter.Client
+	Prompter  prompter.Client
 	Output    io.Writer
 }
 

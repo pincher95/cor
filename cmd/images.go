@@ -1,6 +1,3 @@
-/*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
-*/
 package cmd
 
 import (
@@ -23,7 +20,7 @@ import (
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
-	"github.com/pincher95/cor/pkg/handlers/promter"
+	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -34,7 +31,7 @@ var imagesCmd = &cobra.Command{
 	Long:  ``,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Create prompter using the prompter package
-		prompterClient := promter.NewConsolePrompter(os.Stdin, os.Stdout)
+		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
 		output := os.Stdout
 
 		// Create a new context
@@ -96,7 +93,7 @@ var imagesCmd = &cobra.Command{
 	},
 }
 
-func runImagesCmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
+func runImagesCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	imagesCmd := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
@@ -440,9 +437,9 @@ func (i *AWSCommand) waitForImageDeregistration(ctx context.Context, imageID str
 
 func (i *AWSCommand) deleteImages(ctx context.Context, tableRows *[]table.Row) error {
 
-	userPromter := promter.NewConsolePrompter(os.Stdin, os.Stdout)
+	userPrompter := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
 
-	confirm, err := userPromter.Confirm("Are you sure you want to proceed? (yes/no): ")
+	confirm, err := userPrompter.Confirm("Are you sure you want to proceed? (yes/no): ")
 	if err != nil {
 		i.Logger.LogError("Error during user prompt", err, nil, false)
 		return err

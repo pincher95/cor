@@ -1,4 +1,4 @@
-package promter
+package prompter
 
 import (
 	"bufio"
@@ -22,19 +22,19 @@ func NewConsolePrompter(input io.Reader, output io.Writer) Client {
 		output: output,
 	}
 
-	return &promter{Promter: p}
+	return &prompter{Prompter: p}
 }
 
-type promter struct {
-	Promter *consolePrompterConfig
+type prompter struct {
+	Prompter *consolePrompterConfig
 }
 
-func (p *promter) Confirm(prompt string) (*bool, error) {
-	if _, err := fmt.Fprint(p.Promter.output, prompt); err != nil {
+func (p *prompter) Confirm(prompt string) (*bool, error) {
+	if _, err := fmt.Fprint(p.Prompter.output, prompt); err != nil {
 		return nil, err
 	}
 
-	reader := bufio.NewReader(p.Promter.input)
+	reader := bufio.NewReader(p.Prompter.input)
 	response, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, err
