@@ -29,7 +29,7 @@ type addressWithTags struct {
 
 // elasticaddressesCmd represents the elasticaddresses command
 var elasticIPsCmd = &cobra.Command{
-	Use:   "elasticaIPs",
+	Use:   "elasticips",
 	Short: "A brief description of your command",
 	Long: `A longer description that spans multiple lines and likely contains examples
 and usage of using your command. For example:
@@ -181,7 +181,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 
 	// Result collector goroutine: concurrently reads from resultsChan.
 	resultCollectorDone := make(chan struct{})
-	var tableRows []table.Row
+	tableRows := make([]table.Row, 0)
 	go func() {
 		for res := range resultsChan {
 			tableRows = append(tableRows, res)

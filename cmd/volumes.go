@@ -168,7 +168,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 
 	// Result collector goroutine: concurrently reads from resultsChan.
 	resultCollectorDone := make(chan struct{})
-	var tableRows []table.Row
+	tableRows := make([]table.Row, 0)
 	var totalSize int32
 	go func() {
 		for res := range resultsChan {
