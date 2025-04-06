@@ -33,7 +33,7 @@ func (r *CommandFlagRetriever) GetBool(name string) (bool, error) {
 	return r.Cmd.Flags().GetBool(name)
 }
 
-func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]interface{}, error) {
+func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]any, error) {
 	baseFlags := []Flag{
 		{Name: "region", Type: "string"},
 		{Name: "auth-method", Type: "string"},
@@ -42,7 +42,7 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]
 	}
 
 	allFlags := append(baseFlags, additionalFlags...)
-	results := make(map[string]interface{}, len(allFlags))
+	results := make(map[string]any, len(allFlags))
 
 	for _, flag := range allFlags {
 		var err error

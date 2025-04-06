@@ -36,7 +36,7 @@ func (l *Logger) LogError(message string, err error, context map[string]any, exi
 }
 
 // LogInfo logs an informational message with context.
-func (l *Logger) LogInfo(message string, context map[string]interface{}) {
+func (l *Logger) LogInfo(message string, context map[string]any) {
 	logMessage := message
 	if context != nil {
 		logMessage += " | Context: "

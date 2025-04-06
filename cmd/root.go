@@ -50,7 +50,7 @@ func Execute(ctx context.Context) error {
 	logger := logging.NewLogger()
 	start := time.Now()
 	err := rootCmd.ExecuteContext(ctx)
-	logger.LogInfo("Time taken to process:", map[string]interface{}{"time": time.Since(start).String()})
+	logger.LogInfo("Time taken to process:", map[string]any{"time": time.Since(start).String()})
 	if err != nil {
 		return err
 	}

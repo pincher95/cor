@@ -89,7 +89,7 @@ func init() {
 	elbv2Cmd.Flags().String("filter-by-name", "", "The name of the elbv2 which matches an entire day.")
 }
 
-func runElbv2Cmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]interface{}) error {
+func runElbv2Cmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	// Create an instance of elbv2Command
 	elbCmd := &AWSCommand{
 		AWSClient: *awsClient,
@@ -101,7 +101,7 @@ func runElbv2Cmd(ctx context.Context, prompter *promter.Client, output io.Writer
 	return elbCmd.execute(ctx, flagValues)
 }
 
-func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]interface{}) error {
+func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]any) error {
 	// Create channels to send load balancers
 	loadBalancerChan := make(chan types.LoadBalancer, 50)
 	tableRowChan := make(chan *table.Row, 50)
@@ -174,7 +174,7 @@ func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]interfa
 					e.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
 				} else if *confirm {
 					for _, tableRow := range tableRows {
-						e.Logger.LogInfo("Deleting LoadBalancer", map[string]interface{}{"LoadBalancerName": tableRow[0].(string)})
+						e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": tableRow[0].(string)})
 
 						// Delete Listeners
 						if err := e.deleteListeners(ctx, aws.String(tableRow[1].(string))); err != nil {
@@ -319,7 +319,7 @@ func (e *AWSCommand) deleteListeners(ctx context.Context, loadBalancerArn *strin
 		}
 
 		for _, listener := range listenerPage.Listeners {
-			e.Logger.LogInfo("Deleting listener", map[string]interface{}{"ListenerArn": *listener.ListenerArn})
+			e.Logger.LogInfo("Deleting listener", map[string]any{"ListenerArn": *listener.ListenerArn})
 			_, err := e.AWSClient.DeleteListener(ctx, &elasticloadbalancingv2.DeleteListenerInput{
 				ListenerArn: listener.ListenerArn,
 			})
@@ -340,7 +340,7 @@ func (e *AWSCommand) deleteTargetGroups(ctx context.Context, targetGroupNames []
 	}
 
 	for _, target := range targerGroups.TargetGroups {
-		e.Logger.LogInfo("Deleting target group", map[string]interface{}{"TargetGroupName": *target.TargetGroupName})
+		e.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupName": *target.TargetGroupName})
 		_, err = e.AWSClient.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{
 			TargetGroupArn: target.TargetGroupArn,
 		})

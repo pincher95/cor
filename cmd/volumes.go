@@ -225,7 +225,7 @@ func (v *AWSCommand) deleteVolumes(ctx context.Context, tableRows *[]table.Row) 
 				continue
 			}
 			// Delete the volume
-			v.Logger.LogInfo("Deleting Volumes", map[string]interface{}{"VolumeName": tableRow[0].(string)})
+			v.Logger.LogInfo("Deleting Volumes", map[string]any{"VolumeName": tableRow[0].(string)})
 			_, err := v.AWSClient.DeleteVolume(ctx, &ec2.DeleteVolumeInput{
 				VolumeId: aws.String(tableRow[1].(string)),
 			})

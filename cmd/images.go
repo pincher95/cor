@@ -96,7 +96,7 @@ var imagesCmd = &cobra.Command{
 	},
 }
 
-func runImagesCmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]interface{}) error {
+func runImagesCmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	imagesCmd := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
@@ -107,7 +107,7 @@ func runImagesCmd(ctx context.Context, prompter *promter.Client, output io.Write
 	return imagesCmd.executeImages(ctx, flagValues)
 }
 
-func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]interface{}) error {
+func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]any) error {
 	// Create a channels to process images concurrently
 	imagesChan := make(chan ec2types.Image, 100)
 	resultsChan := make(chan table.Row, 100)
@@ -466,7 +466,7 @@ func (i *AWSCommand) deleteImages(ctx context.Context, tableRows *[]table.Row) e
 			if err != nil {
 				i.Logger.LogError("Error verifying image deregistration", err, nil, false)
 			}
-			i.Logger.LogInfo("Verified image has been deregistered", map[string]interface{}{"imageID": tableRow[1].(string)})
+			i.Logger.LogInfo("Verified image has been deregistered", map[string]any{"imageID": tableRow[1].(string)})
 
 			for _, snapshot := range strings.Split(tableRow[3].(string), "\n") {
 				_, err := i.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
@@ -486,7 +486,7 @@ func (i *AWSCommand) deleteImages(ctx context.Context, tableRows *[]table.Row) e
 	return nil
 }
 
-func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, flagValues *map[string]interface{}, resultsChan chan<- table.Row) error {
+func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, flagValues *map[string]any, resultsChan chan<- table.Row) error {
 	snapshotIds := getSnapshotIds(image)
 
 	var usedByInstances, usedByLaunchTemplates []string
@@ -553,7 +553,7 @@ func getSnapshotIds(image ec2types.Image) []string {
 }
 
 // printVolumeTable prints the volume table
-func printImageTable(tableRows *[]table.Row, flagValues *map[string]interface{}) error {
+func printImageTable(tableRows *[]table.Row, flagValues *map[string]any) error {
 
 	tableRowHeader := table.Row{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance", "used by Launch Template"}
 	tableColumnConfig := []table.ColumnConfig{
