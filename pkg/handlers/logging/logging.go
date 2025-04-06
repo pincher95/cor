@@ -18,7 +18,7 @@ func NewLogger() *Logger {
 }
 
 // LogError logs an error with a message and context.
-func (l *Logger) LogError(message string, err error, context map[string]interface{}, exit bool) {
+func (l *Logger) LogError(message string, err error, context map[string]any, exit bool) {
 	logMessage := message
 	if err != nil {
 		logMessage += ": " + err.Error()

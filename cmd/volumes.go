@@ -7,7 +7,8 @@ import (
 	"context"
 	"io"
 	"os"
-	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -82,128 +83,127 @@ var volumesCmd = &cobra.Command{
 	},
 }
 
-func runVolumeCmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]interface{}) error {
-	// Create an instance of elbv2Command
-	elbCmd := &AWSCommand{
+func runVolumeCmd(ctx context.Context, prompter *promter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
+	// Create an instance of AWSCommand
+	volumeCmd := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
 		Prompter:  *prompter,
 		Output:    output,
 	}
 
-	return elbCmd.executeELB(ctx, flagValues)
+	return volumeCmd.executeVolumes(ctx, flagValues)
 }
 
-func (v *AWSCommand) executeELB(ctx context.Context, flagValues *map[string]interface{}) error {
-	// Create a channel to process volumes concurrently
+func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
 	volumeWithTagsChan := make(chan volumeWithTags, 10)
-	errorChan := make(chan error, 1)
-	// doneChan := make(chan struct{})
 	resultsChan := make(chan volumeResult, 10)
 
-	// wg.Add(1)
-	go func() {
-		// Create a filter for the volumes
+	// Create an errgroup with context
+	g, ctx := errgroup.WithContext(ctx)
+
+	// Goroutine to describe volumes
+	g.Go(func() error {
 		volumeFilter := []types.Filter{
 			{
 				Name:   aws.String("status"),
 				Values: []string{"available"},
 			},
 			{
-				Name:   aws.String("tag:Name"),
-				Values: []string{(*flagValues)["filter-by-name"].(string)},
+				Name: aws.String("tag:Name"),
+				Values: func() []string {
+					if filterByName, ok := (*flagValues)["filter-by-name"].(string); ok {
+						return []string{filterByName}
+					}
+					return []string{}
+				}(),
 			},
 		}
 		if err := v.DescribeVolumes(ctx, volumeWithTagsChan, &volumeFilter); err != nil {
-			errorChan <- err
-			return
-		}
-	}()
-
-	// Start worker goroutines to process volumes
-	numWorkers := 10
-	// Create a wait group
-	var wg sync.WaitGroup
-
-	for range numWorkers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for volume := range volumeWithTagsChan {
-				// Process the volume
-				volumeWithTags, err := handleVolume(volume)
-				if err != nil {
-					errorChan <- err
-					return
-				}
-				row := table.Row{
-					*volumeWithTags.TagMap["Name"].Value,
-					*volumeWithTags.Volume.VolumeId,
-					*volumeWithTags.Volume.SnapshotId,
-					*volumeWithTags.Volume.Size,
-				}
-				// Send the result struct to resultsChan
-				resultsChan <- volumeResult{row: row, size: *volumeWithTags.Volume.Size}
-			}
-		}()
-	}
-
-	// Wait for all goroutines to finish
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
-
-	// Dynamically collect results and process them in a select loop
-	var tableRows []table.Row
-	var totalSize int32
-
-	// Process the volumes concurrently
-	for {
-		select {
-		case err := <-errorChan:
-			v.Logger.LogError("Error during volume processing", err, nil, false)
 			return err
-		case res, ok := <-resultsChan:
-			if ok {
-				tableRows = append(tableRows, res.row)
-				totalSize += res.size
-			} else {
-				// All processing is done
-				tableRows = append(tableRows, table.Row{"", "", "", totalSize, "Total"})
-				// Print the volume table
-				if err := printVolumeTable(&tableRows); err != nil {
-					v.Logger.LogError("Error printing volume table", err, nil, false)
-					return err
-				}
-				// Handle volume deletion based on flag
-				if (*flagValues)["delete"].(bool) {
-					if err := v.deleteVolumes(ctx, &tableRows); err != nil {
+		}
+		return nil
+	})
+
+	// Launch worker goroutines
+	numWorkers := 10
+	for range numWorkers {
+		g.Go(func() error {
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case volume, ok := <-volumeWithTagsChan:
+					if !ok {
+						return nil
+					}
+					processedVolume, err := handleVolume(volume)
+					if err != nil {
 						return err
 					}
+					// Safely dereference pointers with nil checks
+					name := "-"
+					if tag, exists := processedVolume.TagMap["Name"]; exists && tag.Value != nil {
+						name = *tag.Value
+					}
+					volID := ""
+					if processedVolume.Volume.VolumeId != nil {
+						volID = *processedVolume.Volume.VolumeId
+					}
+					snapshotID := ""
+					if processedVolume.Volume.SnapshotId != nil {
+						snapshotID = *processedVolume.Volume.SnapshotId
+					}
+					size := int32(0)
+					if processedVolume.Volume.Size != nil {
+						size = *processedVolume.Volume.Size
+					}
+					row := table.Row{name, volID, snapshotID, size}
+					resultsChan <- volumeResult{row: row, size: size}
 				}
-				return nil
 			}
+		})
+	}
 
-		case <-ctx.Done():
-			v.Logger.LogInfo("Operation canceled", nil)
-			return ctx.Err()
+	// Result collector goroutine: concurrently reads from resultsChan.
+	resultCollectorDone := make(chan struct{})
+	var tableRows []table.Row
+	var totalSize int32
+	go func() {
+		for res := range resultsChan {
+			tableRows = append(tableRows, res.row)
+			totalSize += res.size
+		}
+		close(resultCollectorDone)
+	}()
+
+	// Wait for the describer and workers to finish.
+	if err := g.Wait(); err != nil {
+		v.Logger.LogError("Error during volume processing", err, nil, false)
+		return err
+	}
+
+	// All worker and describer goroutines are done; close the results channel.
+	close(resultsChan)
+	// Wait for the collector to finish.
+	<-resultCollectorDone
+
+	// Append total row
+	tableRows = append(tableRows, table.Row{"", "", "", totalSize, "Total"})
+	if err := printVolumeTable(&tableRows); err != nil {
+		v.Logger.LogError("Error printing volume table", err, nil, false)
+		return err
+	}
+
+	if (*flagValues)["delete"].(bool) {
+		if err := v.deleteVolumes(ctx, &tableRows); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 func init() {
-	// rootCmd.AddCommand(volumesCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// volumesCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// volumesCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	volumesCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day.")
 }
 
@@ -221,7 +221,7 @@ func (v *AWSCommand) deleteVolumes(ctx context.Context, tableRows *[]table.Row) 
 	} else if *confirm {
 		for _, tableRow := range *tableRows {
 			// Skip the last row which is the total
-			if tableRow[4].(string) == "Total" {
+			if total, ok := tableRow[4].(string); ok && total == "Total" {
 				continue
 			}
 			// Delete the volume
@@ -243,7 +243,14 @@ func (v *AWSCommand) deleteVolumes(ctx context.Context, tableRows *[]table.Row) 
 
 // DescribeVolumes describes the volumes based on the filter provided
 func (v *AWSCommand) DescribeVolumes(ctx context.Context, volumeWithTagsChan chan<- volumeWithTags, filters *[]types.Filter) error {
-	defer close(volumeWithTagsChan)
+	defer func() {
+		if recover() != nil {
+			// Prevent panic if the channel is already closed
+			v.Logger.LogError("Channel `volumeWithTagsChan` closed", nil, nil, false)
+
+		}
+		close(volumeWithTagsChan)
+	}()
 
 	// If filters are nil, create an empty filter
 	if filters == nil {
@@ -286,10 +293,9 @@ func handleVolume(volume volumeWithTags) (*volumeWithTags, error) {
 	}, nil
 }
 
-// printVolumeTable prints the volume table
-func printVolumeTable(tableRows *[]table.Row) error {
-
-	columnConfig := []table.ColumnConfig{
+// getColumnConfig returns the column configuration for the volume table
+func getColumnConfig() *[]table.ColumnConfig {
+	return &[]table.ColumnConfig{
 		{
 			Name:        "Name",
 			AlignHeader: text.AlignCenter,
@@ -307,6 +313,13 @@ func printVolumeTable(tableRows *[]table.Row) error {
 			AlignHeader: text.AlignCenter,
 		},
 	}
+}
 
-	return printTable(&columnConfig, &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
+// printVolumeTable prints the volume table
+func printVolumeTable(tableRows *[]table.Row) error {
+
+	columnConfig := getColumnConfig()
+	sortConfig := []table.SortBy{{Name: "Name", Mode: table.Dsc}}
+
+	return printTable(columnConfig, &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, tableRows, &sortConfig)
 }
