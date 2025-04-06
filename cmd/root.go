@@ -61,7 +61,7 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(volumesCmd)
 	rootCmd.AddCommand(snapshotsCmd)
 	rootCmd.AddCommand(imagesCmd)
-	rootCmd.AddCommand(elasticaddressesCmd)
+	rootCmd.AddCommand(elasticIPsCmd)
 	rootCmd.AddCommand(elbv1Cmd)
 	rootCmd.AddCommand(elbv2Cmd)
 }

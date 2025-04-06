@@ -96,35 +96,7 @@ type CloudConfig struct {
 }
 
 // NewConfig initializes AWS Client config
-func NewConfig(authMethod string, profile string, region string, timezone string, humanize bool, debug bool) (*aws.Config, error) {
-	ctx := context.Background()
-
-	switch authMethod {
-	// case "IAM_ARN":
-	// 	return authenticateIAMARN(ctx, region)
-	case "AWS_CREDENTIALS_FILE":
-		return authenticateAWSCredentialsFile(ctx, region, profile)
-	case "ENV_SECRET":
-		return authenticateEnvSecret(ctx, region)
-	default:
-		return nil, fmt.Errorf("unsupported authentication method")
-	}
-
-	// stsClient := sts.NewFromConfig(*cfg)
-
-	// _ = aws.NewCredentialsCache(stscreds.NewWebIdentityRoleProvider(
-	// 	stsClient,
-	// 	"roleARN",
-	// 	stscreds.IdentityTokenFile("tokefile"),
-	// 	func(o *stscreds.WebIdentityRoleOptions) {
-	// 		o.RoleSessionName = "session"
-	// 	},
-	// ))
-	// return
-}
-
-// NewConfig initializes AWS Client config
-func NewConfigV2(ctx context.Context, cloudConfig CloudConfig, timezone string, humanize bool, debug bool) (*aws.Config, error) {
+func NewConfig(ctx context.Context, cloudConfig CloudConfig, timezone string, humanize bool, debug bool) (*aws.Config, error) {
 	switch *cloudConfig.AuthMethod {
 	// case "IAM_ARN":
 	// 	return authenticateIAMARN(ctx, region)

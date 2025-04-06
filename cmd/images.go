@@ -74,7 +74,7 @@ var imagesCmd = &cobra.Command{
 			Region:     aws.String((*flagValues)["region"].(string)),
 		}
 		// Create a new AWS client
-		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
+		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
 			return err
 		}

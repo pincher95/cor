@@ -67,7 +67,7 @@ var volumesCmd = &cobra.Command{
 			Region:     aws.String((*flagValues)["region"].(string)),
 		}
 
-		cfg, err := handlers.NewConfigV2(ctx, *cloudConfig, "UTC", true, true)
+		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
 			return err
 		}
@@ -96,6 +96,7 @@ func runVolumeCmd(ctx context.Context, prompter *prompter.Client, output io.Writ
 }
 
 func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
+	// Create a channel to process volumes
 	volumeWithTagsChan := make(chan volumeWithTags, 10)
 	resultsChan := make(chan volumeResult, 10)
 
@@ -190,6 +191,8 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 
 	// Append total row
 	tableRows = append(tableRows, table.Row{"", "", "", totalSize, "Total"})
+
+	// Print the table
 	if err := printVolumeTable(&tableRows); err != nil {
 		v.Logger.LogError("Error printing volume table", err, nil, false)
 		return err
@@ -275,6 +278,7 @@ func (v *AWSCommand) DescribeVolumes(ctx context.Context, volumeWithTagsChan cha
 			volumeWithTagsChan <- volumeWithTags{Volume: volume, TagMap: tagMap}
 		}
 	}
+
 	return nil
 }
 
@@ -286,7 +290,6 @@ func handleVolume(volume volumeWithTags) (*volumeWithTags, error) {
 			Value: aws.String("-"),
 		}
 	}
-
 	return &volumeWithTags{
 		Volume: volume.Volume,
 		TagMap: volume.TagMap,
@@ -294,7 +297,7 @@ func handleVolume(volume volumeWithTags) (*volumeWithTags, error) {
 }
 
 // getColumnConfig returns the column configuration for the volume table
-func getColumnConfig() *[]table.ColumnConfig {
+func getVolumeColumnConfig() *[]table.ColumnConfig {
 	return &[]table.ColumnConfig{
 		{
 			Name:        "Name",
@@ -318,7 +321,7 @@ func getColumnConfig() *[]table.ColumnConfig {
 // printVolumeTable prints the volume table
 func printVolumeTable(tableRows *[]table.Row) error {
 
-	columnConfig := getColumnConfig()
+	columnConfig := getVolumeColumnConfig()
 	sortConfig := []table.SortBy{{Name: "Name", Mode: table.Dsc}}
 
 	return printTable(columnConfig, &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, tableRows, &sortConfig)
