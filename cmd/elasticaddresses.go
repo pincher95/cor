@@ -131,7 +131,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	})
 
 	// Launch worker goroutines
-	numWorkers := 10
+	numWorkers := NumGoroutines
 	for range numWorkers {
 		g.Go(func() error {
 			for {

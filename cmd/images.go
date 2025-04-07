@@ -164,7 +164,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 	})
 
 	// Start worker pool for processing images concurrently
-	numWorkers := 10
+	numWorkers := NumGoroutines
 	for range numWorkers {
 		g.Go(func() error {
 			for {
@@ -175,7 +175,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 					if !ok {
 						return nil
 					}
-					err := i.processImage(ctx, image, flagValues, resultsChan)
+					err := i.handleImage(ctx, image, flagValues, resultsChan)
 					if err != nil {
 						return err
 					}
@@ -477,7 +477,7 @@ func (i *AWSCommand) deleteImages(ctx context.Context, tableRows *[]table.Row) e
 	return nil
 }
 
-func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, flagValues *map[string]any, resultsChan chan<- table.Row) error {
+func (i *AWSCommand) handleImage(ctx context.Context, image ec2types.Image, flagValues *map[string]any, resultsChan chan<- table.Row) error {
 	// Check required fields for nil.
 	if image.Name == nil || image.ImageId == nil || image.CreationDate == nil {
 		return errors.New("missing required image fields")

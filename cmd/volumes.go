@@ -127,7 +127,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	})
 
 	// Launch worker goroutines
-	numWorkers := 10
+	numWorkers := NumGoroutines
 	for range numWorkers {
 		g.Go(func() error {
 			for {
