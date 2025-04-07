@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +21,7 @@ import (
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 // imagesCmd represents the images command
@@ -106,13 +106,8 @@ func runImagesCmd(ctx context.Context, prompter *prompter.Client, output io.Writ
 
 func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]any) error {
 	// Create a channels to process images concurrently
-	imagesChan := make(chan ec2types.Image, 100)
-	resultsChan := make(chan table.Row, 100)
-	errorChan := make(chan error, 1)
-	doneChan := make(chan struct{})
-
-	// Create a wait group
-	var wg sync.WaitGroup
+	imagesChan := make(chan ec2types.Image, 10)
+	resultsChan := make(chan table.Row, 10)
 
 	// Parse the creation date flags
 	var beforeCreationDate, afterCreationDate *time.Time
@@ -121,7 +116,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 		t, err := time.Parse(dateLayout, (*flagValues)["creation-date-before"].(string))
 		if err != nil {
 			i.Logger.LogError("Error parsing creation date", err, nil, false)
-			errorChan <- err
+			return err
 		}
 		beforeCreationDate = &t
 	}
@@ -129,95 +124,103 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 		t, err := time.Parse(dateLayout, (*flagValues)["creation-date-after"].(string))
 		if err != nil {
 			i.Logger.LogError("Error parsing creation date", err, nil, false)
-			errorChan <- err
+			return err
 		}
 		afterCreationDate = &t
 	}
 
-	// Start a goroutine to fetch images and send them to the channel
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	// Create an errgroup with context
+	g, ctx := errgroup.WithContext(ctx)
 
-		// Get the account ID
-		ownerID, err := i.AWSClient.STS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-		if err != nil {
-			i.Logger.LogError("Error getting caller identity", err, nil, false)
-			errorChan <- err
+	// Get the account ID
+	ownerID, err := i.AWSClient.STS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		i.Logger.LogError("Error getting caller identity", err, nil, false)
+		return err
+	}
+
+	// Goroutine to describe volumes
+	g.Go(func() error {
+		imageFilter := []ec2types.Filter{
+			{
+				Name:   aws.String("owner-id"),
+				Values: []string{*ownerID.Account},
+			},
+			{
+				Name: aws.String("name"),
+				Values: func() []string {
+					if filterByName, ok := (*flagValues)["filter-by-name"].(string); ok {
+						return []string{filterByName}
+					}
+					return []string{}
+				}(),
+			},
 		}
 
-		err = i.describeImages(ctx, imagesChan, ownerID.Account, aws.String((*flagValues)["filter-by-name"].(string)), beforeCreationDate, afterCreationDate)
-		if err != nil {
-			i.Logger.LogError("Error describe images", err, nil, false)
-			errorChan <- err
+		if err := i.describeImages(ctx, imagesChan, &imageFilter, beforeCreationDate, afterCreationDate); err != nil {
+			return err
 		}
-	}()
+		return nil
+	})
 
 	// Start worker pool for processing images concurrently
-	const numWorkers = 20
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for image := range imagesChan {
-				err := i.processImage(ctx, image, flagValues, resultsChan)
-				if err != nil {
-					errorChan <- err
+	numWorkers := 10
+	for range numWorkers {
+		g.Go(func() error {
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case image, ok := <-imagesChan:
+					if !ok {
+						return nil
+					}
+					err := i.processImage(ctx, image, flagValues, resultsChan)
+					if err != nil {
+						return err
+					}
 				}
 			}
-		}()
+		})
 	}
 
-	// Wait for all goroutines to finish
+	// Result collector goroutine: concurrently reads from resultsChan.
+	resultCollectorDone := make(chan struct{})
+	tableRows := make([]table.Row, 0)
 	go func() {
-		wg.Wait()
-		close(doneChan)
-		close(resultsChan)
+		for imageRow := range resultsChan {
+			tableRows = append(tableRows, imageRow)
+		}
+		close(resultCollectorDone)
 	}()
 
-	// Start a goroutine to accumulate the rows into tableRows
-	tableRows := make([]table.Row, 0)
+	// Wait for the describer and workers to finish.
+	if err := g.Wait(); err != nil {
+		i.Logger.LogError("Error during image processing", err, nil, false)
+		return err
+	}
 
-	for {
-		select {
-		case err := <-errorChan:
-			i.Logger.LogError("Error during volume processing", err, nil, true)
+	// All worker and describer goroutines are done; close the results channel.
+	close(resultsChan)
+	// Wait for the collector to finish.
+	<-resultCollectorDone
+
+	// Print the image table
+	if err := printImageTable(&tableRows, flagValues); err != nil {
+		i.Logger.LogError("Error printing table", err, nil, false)
+		return err
+	}
+
+	if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
+		if err := i.deleteImages(ctx, &tableRows); err != nil {
 			return err
-		case <-doneChan:
-			// Process any remaining results after workers are done
-			for imageRow := range resultsChan {
-				tableRows = append(tableRows, imageRow)
-			}
-
-			// Print the image table
-			if err := printImageTable(&tableRows, flagValues); err != nil {
-				i.Logger.LogError("Error printing table", err, nil, false)
-				errorChan <- err
-			}
-
-			// Handle image deletion based on flag
-			if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
-				if err := i.deleteImages(ctx, &tableRows); err != nil {
-					return err
-				}
-			}
-			return nil
-		case imageRow := <-resultsChan:
-			// Append each row to table in the main goroutine
-			tableRows = append(tableRows, imageRow)
-
 		}
 	}
+
+	return nil
 }
 
 func init() {
-	// rootCmd.AddCommand(imagesCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// imagesCmd.PersistentFlags().String("creation-date-before", time.Now().UTC().Format("2006-01-02"), "The time when the image was created, in the UTC time zone (YYYY-MM-DD), for example, 2021-09-29.")
 	imagesCmd.PersistentFlags().String("creation-date-before", "", "The time when the image was created, in the UTC time zone (YYYY-MM-DD), for example, 2021-09-29.")
 
 	imagesCmd.PersistentFlags().String("creation-date-after", "", "The time when the image was created, in the UTC time zone (YYYY-MM-DD), for example, 2021-09-29.")
@@ -322,21 +325,12 @@ func (i *AWSCommand) describeLaunchTemplates(ctx context.Context, imageID *strin
 	return usedByLaunchTemplates, nil
 }
 
-func (i *AWSCommand) describeImages(ctx context.Context, imagesChan chan<- ec2types.Image, ownerID, imageName *string, beforeCreationDate, afterCreationDate *time.Time) error {
+func (i *AWSCommand) describeImages(ctx context.Context, imagesChan chan<- ec2types.Image, filters *[]ec2types.Filter, beforeCreationDate, afterCreationDate *time.Time) error {
 	defer close(imagesChan)
 
 	paginator := ec2.NewDescribeImagesPaginator(i.AWSClient.EC2, &ec2.DescribeImagesInput{
-		Filters: []ec2types.Filter{
-			{
-				Name:   aws.String("owner-id"),
-				Values: []string{*ownerID},
-			},
-			{
-				Name:   aws.String("name"),
-				Values: []string{*imageName},
-			},
-		},
-		Owners: []string{*ownerID, "self"},
+		Filters: *filters,
+		Owners:  []string{"self"},
 	})
 
 	for paginator.HasMorePages() {
@@ -484,6 +478,11 @@ func (i *AWSCommand) deleteImages(ctx context.Context, tableRows *[]table.Row) e
 }
 
 func (i *AWSCommand) processImage(ctx context.Context, image ec2types.Image, flagValues *map[string]any, resultsChan chan<- table.Row) error {
+	// Check required fields for nil.
+	if image.Name == nil || image.ImageId == nil || image.CreationDate == nil {
+		return errors.New("missing required image fields")
+	}
+
 	snapshotIds := getSnapshotIds(image)
 
 	var usedByInstances, usedByLaunchTemplates []string
@@ -659,13 +658,3 @@ func printImageTable(tableRows *[]table.Row, flagValues *map[string]any) error {
 
 	return printTable(&tableColumnConfig, &tableRowHeader, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
 }
-
-// func getInstances(instanceChan <-chan ec2types.Instance, imageID *string) []string {
-// 	usedByInstances := make([]string, 0)
-// 	for instance := range instanceChan {
-// 		if *instance.ImageId == *imageID {
-// 			usedByInstances = append(usedByInstances, *instance.InstanceId)
-// 		}
-// 	}
-// 	return usedByInstances
-// }
