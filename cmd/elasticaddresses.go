@@ -43,7 +43,7 @@ to quickly create a Cobra application.`,
 		output := os.Stdout
 
 		// Create a context
-		ctx := context.TODO()
+		ctx := cmd.Context()
 
 		// Create a new logger and error handler
 		logger := logging.NewLogger()

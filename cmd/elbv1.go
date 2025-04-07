@@ -25,8 +25,8 @@ var elbv1Cmd = &cobra.Command{
 	Use:   "elbv1",
 	Short: "Return ELB of type Classic",
 	Long:  `Return Classic ELB with instance state unhealthy.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.TODO()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
 
 		// Create a new logger and error handler
 		logger := logging.NewLogger()
@@ -38,7 +38,7 @@ var elbv1Cmd = &cobra.Command{
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
 			logger.LogError("Error getting flags", err, nil, true)
-			return
+			return err
 		}
 
 		cloudConfig := &handlers.CloudConfig{
@@ -50,7 +50,7 @@ var elbv1Cmd = &cobra.Command{
 		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
 			logger.LogError("Failed loading AWS client config", err, nil, true)
-			return
+			return err
 		}
 
 		client := elasticloadbalancing.NewFromConfig(*cfg)
@@ -100,7 +100,7 @@ var elbv1Cmd = &cobra.Command{
 			select {
 			case err := <-errorChan:
 				logger.LogError("Error during loadbalancer processing", err, nil, true)
-				return
+				return err
 			case <-doneChan:
 				close(tableRowChan)
 				for row := range tableRowChan {
@@ -130,7 +130,7 @@ var elbv1Cmd = &cobra.Command{
 				if err := printerClient.PrintTextTable(&tableRows); err != nil {
 					logger.LogError("Error printing table", err, nil, false)
 				}
-				return
+				return err
 			}
 		}
 	},
