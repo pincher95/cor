@@ -173,19 +173,19 @@ func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]any) er
 				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": tableRow[0].(string)})
 
 				// Delete Listeners
-				if err := e.deleteListeners(ctx, aws.String(tableRow[1].(string))); err != nil {
+				if err := e.deleteListeners(context.TODO(), aws.String(tableRow[1].(string))); err != nil {
 					e.Logger.LogError("Error deleting listeners", err, nil, false)
 					return err
 				}
 
 				// Delete Target Groups
-				if err := e.deleteTargetGroups(ctx, strings.Split(tableRow[2].(string), "\n")); err != nil {
+				if err := e.deleteTargetGroups(context.TODO(), strings.Split(tableRow[2].(string), "\n")); err != nil {
 					e.Logger.LogError("Error deleting target groups", err, nil, false)
 					return err
 				}
 
 				// Delete Load Balancer
-				_, err = e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
+				_, err = e.AWSClient.DeleteLoadBalancer(context.TODO(), &elasticloadbalancingv2.DeleteLoadBalancerInput{
 					LoadBalancerArn: aws.String(tableRow[1].(string)),
 				})
 				if err != nil {
@@ -348,7 +348,7 @@ func (e *AWSCommand) deleteListeners(ctx context.Context, loadBalancerArn *strin
 		}
 
 		for _, listener := range listenerPage.Listeners {
-			e.Logger.LogInfo("Deleting listener", map[string]any{"ListenerArn": *listener.ListenerArn})
+			e.Logger.LogInfo("Deleting", map[string]any{"ListenerArn": *listener.ListenerArn})
 			_, err := e.AWSClient.DeleteListener(ctx, &elasticloadbalancingv2.DeleteListenerInput{
 				ListenerArn: listener.ListenerArn,
 			})
@@ -369,7 +369,7 @@ func (e *AWSCommand) deleteTargetGroups(ctx context.Context, targetGroupNames []
 	}
 
 	for _, target := range targerGroups.TargetGroups {
-		e.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupName": *target.TargetGroupName})
+		e.Logger.LogInfo("Deleting", map[string]any{"TargetGroupName": *target.TargetGroupName})
 		_, err = e.AWSClient.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{
 			TargetGroupArn: target.TargetGroupArn,
 		})
