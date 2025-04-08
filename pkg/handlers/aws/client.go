@@ -144,7 +144,7 @@ func authenticateAWSCredentialsFile(ctx context.Context, region string, profile 
 				// Makes the rate limiter more permissive in general. These values are
 				// arbitrary for demonstration and may not suit your specific
 				// application's needs.
-				o.RateLimiter = ratelimit.NewTokenRateLimit(200)
+				o.RateLimiter = ratelimit.NewTokenRateLimit(500)
 				o.RetryCost = 2         // Cost per retry
 				o.RetryTimeoutCost = 4  // Additional cost for timeout retries
 				o.NoRetryIncrement = 20 // Adds to retry quota for successful calls
