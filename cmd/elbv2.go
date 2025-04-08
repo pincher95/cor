@@ -5,13 +5,13 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -22,6 +22,7 @@ import (
 	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 // elbv2Cmd represents the elbv2 command
@@ -65,9 +66,11 @@ var elbv2Cmd = &cobra.Command{
 
 		// Create an instance of ELBV2 client
 		elbClient := elasticloadbalancingv2.NewFromConfig(*cfg)
+		ec2Client := ec2.NewFromConfig(*cfg)
 
 		awsClient := &handlers.AWSClientImpl{
 			ELB: elbClient,
+			EC2: ec2Client,
 		}
 
 		return runElbv2Cmd(ctx, &prompterClient, output, awsClient, flagValues)
@@ -75,17 +78,6 @@ var elbv2Cmd = &cobra.Command{
 }
 
 func init() {
-	// rootCmd.AddCommand(elbv2Cmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// elbCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// elbCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	elbv2Cmd.Flags().String("filter-by-name", "", "The name of the elbv2 which matches an entire day.")
 }
 
@@ -104,114 +96,113 @@ func runElbv2Cmd(ctx context.Context, prompter *prompter.Client, output io.Write
 func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]any) error {
 	// Create channels to send load balancers
 	loadBalancerChan := make(chan types.LoadBalancer, 50)
-	tableRowChan := make(chan *table.Row, 50)
-	errorChan := make(chan error, 1)
-	doneChan := make(chan struct{})
+	resultsChan := make(chan table.Row, 50)
 
-	// Create a wait group
-	var wg sync.WaitGroup
+	// Create an errgroup with context
+	g, ctx := errgroup.WithContext(ctx)
 
-	// Create a slice of table.Row
-	var tableRows []table.Row
-
-	// Start a goroutine to describe load balancers
-	go func() {
+	// Goroutine to describe load balancers
+	g.Go(func() error {
 		if err := e.describeLoadBalancersV2(ctx, loadBalancerChan); err != nil {
-			errorChan <- err
-		}
-	}()
-
-	// Start a goroutine to process load balancers
-	for lb := range loadBalancerChan {
-		wg.Add(1)
-		lb := lb
-		go func(lb types.LoadBalancer) {
-			defer wg.Done()
-			fmt.Println("Processing LoadBalancer", *lb.LoadBalancerName)
-			tableRow, err := e.handleLoadBalancerV2(ctx, lb, (*flagValues)["filter-by-name"].(string))
-			if err != nil {
-				errorChan <- err
-				return
-			}
-			if tableRow != nil {
-				tableRowChan <- tableRow
-			}
-		}(lb)
-	}
-
-	// Start a goroutine to wait for all processing to complete
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	// Process the load balancers concurrently
-	for {
-		select {
-		case err := <-errorChan:
-			e.Logger.LogError("Error during loadbalancer processing", err, nil, false)
 			return err
-		case <-doneChan:
-			close(tableRowChan)
-			for row := range tableRowChan {
-				tableRows = append(tableRows, *row)
-			}
+		}
+		return nil
+	})
 
-			// Print table
-			if err := printLoadBalancerV2Table(&tableRows); err != nil {
-				e.Logger.LogError("Error printing table", err, nil, false)
-				errorChan <- err
-			}
-
-			if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
-				confirm, err := e.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-				if err != nil {
-					e.Logger.LogError("Error during user prompt", err, nil, false)
-					errorChan <- err
-				}
-
-				if confirm == nil {
-					e.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
-				} else if *confirm {
-					for _, tableRow := range tableRows {
-						e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": tableRow[0].(string)})
-
-						// Delete Listeners
-						if err := e.deleteListeners(ctx, aws.String(tableRow[1].(string))); err != nil {
-							e.Logger.LogError("Error deleting listeners", err, nil, false)
-							return err
-						}
-
-						// Delete Target Groups
-						if err := e.deleteTargetGroups(ctx, strings.Split(tableRow[2].(string), "\n")); err != nil {
-							e.Logger.LogError("Error deleting target groups", err, nil, false)
-							return err
-						}
-
-						// Delete Load Balancer
-						_, err = e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
-							LoadBalancerArn: aws.String(tableRow[1].(string)),
-						})
-						if err != nil {
-							e.Logger.LogError("Error deleting loadbalancer", err, nil, false)
-							errorChan <- err
-						}
+	numWorkers := NumGoroutines
+	for range numWorkers {
+		g.Go(func() error {
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case lb, ok := <-loadBalancerChan:
+					if !ok {
+						return nil
 					}
-				} else if !*confirm {
-					e.Logger.LogInfo("Aborted.", nil)
+					tableRow, err := e.handleLoadBalancerV2(ctx, lb, (*flagValues)["filter-by-name"].(string))
+					if err != nil {
+						return err
+					}
+					if tableRow != nil {
+						resultsChan <- *tableRow
+					}
 				}
 			}
-			return nil
-		case <-ctx.Done():
-			e.Logger.LogInfo("Operation canceled", nil)
-			return ctx.Err()
+		})
+	}
+
+	// Result collector goroutine: concurrently reads from resultsChan.
+	resultCollectorDone := make(chan struct{})
+	tableRows := make([]table.Row, 0)
+	go func() {
+		for res := range resultsChan {
+			tableRows = append(tableRows, res)
+		}
+		close(resultCollectorDone)
+	}()
+
+	// Wait for the describer and workers to finish.
+	if err := g.Wait(); err != nil {
+		e.Logger.LogError("Error during volume processing", err, nil, false)
+		return err
+	}
+
+	// All worker and describer goroutines are done; close the results channel.
+	close(resultsChan)
+	// Wait for the collector to finish.
+	<-resultCollectorDone
+
+	// Print table
+	if err := printLoadBalancerV2Table(&tableRows); err != nil {
+		e.Logger.LogError("Error printing table", err, nil, false)
+		return err
+	}
+
+	if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
+		confirm, err := e.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+		if err != nil {
+			e.Logger.LogError("Error during user prompt", err, nil, false)
+			return err
+		}
+
+		if confirm == nil {
+			e.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
+		} else if *confirm {
+			for _, tableRow := range tableRows {
+				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": tableRow[0].(string)})
+
+				// Delete Listeners
+				if err := e.deleteListeners(ctx, aws.String(tableRow[1].(string))); err != nil {
+					e.Logger.LogError("Error deleting listeners", err, nil, false)
+					return err
+				}
+
+				// Delete Target Groups
+				if err := e.deleteTargetGroups(ctx, strings.Split(tableRow[2].(string), "\n")); err != nil {
+					e.Logger.LogError("Error deleting target groups", err, nil, false)
+					return err
+				}
+
+				// Delete Load Balancer
+				_, err = e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
+					LoadBalancerArn: aws.String(tableRow[1].(string)),
+				})
+				if err != nil {
+					e.Logger.LogError("Error deleting loadbalancer", err, nil, false)
+					return err
+				}
+			}
+		} else if !*confirm {
+			e.Logger.LogInfo("Aborted.", nil)
 		}
 	}
+
+	return nil
 }
 
 func (e *AWSCommand) describeLoadBalancersV2(ctx context.Context, loadBalancerChan chan<- types.LoadBalancer) error {
-	defer close(loadBalancerChan)
-
+	// Create a paginator to describe load balancers and send them to the channel
 	paginator := elasticloadbalancingv2.NewDescribeLoadBalancersPaginator(e.AWSClient.ELB, &elasticloadbalancingv2.DescribeLoadBalancersInput{})
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -219,10 +210,10 @@ func (e *AWSCommand) describeLoadBalancersV2(ctx context.Context, loadBalancerCh
 			return err
 		}
 		for _, lb := range page.LoadBalancers {
-			fmt.Println("Found LoadBalancer", *lb.LoadBalancerName)
 			loadBalancerChan <- lb
 		}
 	}
+	close(loadBalancerChan)
 	return nil
 }
 
@@ -247,6 +238,87 @@ func (e *AWSCommand) handleLoadBalancerV2(ctx context.Context, elb types.LoadBal
 	return row, nil
 }
 
+func (e *AWSCommand) processLoadBalancer(ctx context.Context, elb types.LoadBalancer, targetGroups []types.TargetGroup) (*table.Row, error) {
+	// Define a structure for target group results
+	type tgResult struct {
+		tgName         string
+		hasValidTarget bool // true if at least one target in the group is healthy, from delegation, or attached to a valid EC2 instance
+	}
+
+	// Create a buffered channel sized to the number of target groups so sends do not block.
+	resChan := make(chan tgResult, len(targetGroups))
+
+	// Process each target group concurrently using an errgroup.
+	g, ctx := errgroup.WithContext(ctx)
+	for _, tg := range targetGroups {
+		tg := tg // capture loop variable
+		g.Go(func() error {
+			resp, err := e.AWSClient.DescribeTargetHealth(ctx, &elasticloadbalancingv2.DescribeTargetHealthInput{
+				TargetGroupArn: tg.TargetGroupArn,
+			})
+			if err != nil {
+				return err
+			}
+
+			validFound := false
+			// For each target health description, check if it's healthy.
+			// If unhealthy, first check if the target IP is within the delegated range,
+			// and if not, then verify via EC2 if the target exists.
+			for _, desc := range resp.TargetHealthDescriptions {
+				if desc.TargetHealth.State == types.TargetHealthStateEnumHealthy {
+					validFound = true
+					break
+				}
+				exists, err := e.checkInstanceExists(ctx, *desc.Target.Id)
+				if err != nil {
+					continue
+				}
+				if exists {
+					validFound = true
+					break
+				}
+			}
+
+			resChan <- tgResult{tgName: *tg.TargetGroupName, hasValidTarget: validFound}
+			return nil
+		})
+	}
+
+	// Wait for all goroutines to finish
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	close(resChan)
+
+	// Gather results from the channel.
+	var results []tgResult
+	for res := range resChan {
+		results = append(results, res)
+	}
+
+	// If any target group has a valid target, skip this load balancer.
+	for _, r := range results {
+		if r.hasValidTarget {
+			return nil, nil
+		}
+	}
+
+	// Otherwise, join the names of target groups that do not have valid targets.
+	var tgNames []string
+	for _, r := range results {
+		tgNames = append(tgNames, r.tgName)
+	}
+
+	if len(tgNames) > 0 {
+		return &table.Row{
+			*elb.LoadBalancerName,
+			*elb.LoadBalancerArn,
+			strings.Join(tgNames, "\n"),
+		}, nil
+	}
+	return nil, nil
+}
+
 func (e *AWSCommand) getTargetGroups(ctx context.Context, loadBalancerArn *string) ([]types.TargetGroup, error) {
 	var targetGroups []types.TargetGroup
 	paginator := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(e.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{
@@ -262,49 +334,6 @@ func (e *AWSCommand) getTargetGroups(ctx context.Context, loadBalancerArn *strin
 	}
 
 	return targetGroups, nil
-}
-
-func (e *AWSCommand) processLoadBalancer(ctx context.Context, elb types.LoadBalancer, targetGroups []types.TargetGroup) (*table.Row, error) {
-	var targetGroupsWithoutTargets []string
-	var hasTargets bool
-
-	for _, tg := range targetGroups {
-		targetHealthDescriptions, err := e.getTargetHealthDescriptions(ctx, tg.TargetGroupArn)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(targetHealthDescriptions) > 0 {
-			hasTargets = true
-		} else {
-			targetGroupsWithoutTargets = append(targetGroupsWithoutTargets, *tg.TargetGroupName)
-		}
-	}
-
-	if hasTargets {
-		return nil, nil
-	}
-
-	if len(targetGroupsWithoutTargets) > 0 {
-		return &table.Row{
-			*elb.LoadBalancerName,
-			*elb.LoadBalancerArn,
-			strings.Join(targetGroupsWithoutTargets, "\n"),
-			*elb.VpcId,
-		}, nil
-	}
-
-	return nil, nil
-}
-
-func (e *AWSCommand) getTargetHealthDescriptions(ctx context.Context, targetGroupArn *string) ([]types.TargetHealthDescription, error) {
-	output, err := e.AWSClient.DescribeTargetHealth(ctx, &elasticloadbalancingv2.DescribeTargetHealthInput{
-		TargetGroupArn: targetGroupArn,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return output.TargetHealthDescriptions, nil
 }
 
 func (e *AWSCommand) deleteListeners(ctx context.Context, loadBalancerArn *string) error {
@@ -363,16 +392,36 @@ func printLoadBalancerV2Table(tableRows *[]table.Row) error {
 			AlignHeader: text.AlignCenter,
 		},
 		{
-			Name:        "targerGroups without targets",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "VPC ID",
+			Name:        "targetGroups without targets",
 			AlignHeader: text.AlignCenter,
 		},
 	}
 
-	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "LoadBalancer ARN", "targerGroups without targets", "VPC ID"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
+	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "LoadBalancer ARN", "targerGroups without targets"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
 
 	return printerClient.PrintTextTable(tableRows)
+}
+
+// checkInstanceExists verifies via the EC2 API whether an instance exists with the provided IP address.
+// If no instance is found, the target is considered invalid.
+func (e *AWSCommand) checkInstanceExists(ctx context.Context, targetIP string) (bool, error) {
+	input := &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   aws.String("private-ip-address"),
+				Values: []string{targetIP},
+			},
+		},
+	}
+	result, err := e.AWSClient.EC2.DescribeInstances(ctx, input)
+	if err != nil {
+		return false, err
+	}
+
+	for _, reservation := range result.Reservations {
+		if len(reservation.Instances) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
