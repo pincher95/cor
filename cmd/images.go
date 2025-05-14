@@ -105,6 +105,8 @@ func runImagesCmd(ctx context.Context, prompter *prompter.Client, output io.Writ
 }
 
 func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]any) error {
+	// preserve the original context for post-processing
+	rootCtx := ctx
 	// Create a channels to process images concurrently
 	imagesChan := make(chan ec2types.Image, 10)
 	resultsChan := make(chan table.Row, 10)
@@ -129,11 +131,11 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 		afterCreationDate = &t
 	}
 
-	// Create an errgroup with context
-	g, ctx := errgroup.WithContext(ctx)
+	// Create an errgroup with a derived context for cancellation
+	g, egCtx := errgroup.WithContext(ctx)
 
 	// Get the account ID
-	ownerID, err := i.AWSClient.STS.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	ownerID, err := i.AWSClient.STS.GetCallerIdentity(egCtx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		i.Logger.LogError("Error getting caller identity", err, nil, false)
 		return err
@@ -157,7 +159,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 			},
 		}
 
-		if err := i.describeImages(ctx, imagesChan, &imageFilter, beforeCreationDate, afterCreationDate); err != nil {
+		if err := i.describeImages(egCtx, imagesChan, &imageFilter, beforeCreationDate, afterCreationDate); err != nil {
 			return err
 		}
 		return nil
@@ -169,13 +171,13 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case image, ok := <-imagesChan:
 					if !ok {
 						return nil
 					}
-					err := i.handleImage(ctx, image, flagValues, resultsChan)
+					err := i.handleImage(egCtx, image, flagValues, resultsChan)
 					if err != nil {
 						return err
 					}
@@ -191,6 +193,22 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 		for imageRow := range resultsChan {
 			tableRows = append(tableRows, imageRow)
 		}
+
+		// Print the image table
+		if err := printImageTable(&tableRows, flagValues); err != nil {
+			i.Logger.LogError("Error printing table", err, nil, false)
+			close(resultCollectorDone)
+			return
+		}
+
+		if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
+			if err := i.deleteImages(rootCtx, &tableRows); err != nil {
+				i.Logger.LogError("Error deleting images", err, nil, false)
+				close(resultCollectorDone)
+				return
+			}
+		}
+
 		close(resultCollectorDone)
 	}()
 
@@ -204,18 +222,6 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 	close(resultsChan)
 	// Wait for the collector to finish.
 	<-resultCollectorDone
-
-	// Print the image table
-	if err := printImageTable(&tableRows, flagValues); err != nil {
-		i.Logger.LogError("Error printing table", err, nil, false)
-		return err
-	}
-
-	if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
-		if err := i.deleteImages(ctx, &tableRows); err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
