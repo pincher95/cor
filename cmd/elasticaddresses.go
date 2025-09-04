@@ -93,14 +93,14 @@ func init() {
 
 func runElasticIPsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	// Create an instance of elbv2Command
-	elasticIPCmd := &AWSCommand{
+	command := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
 		Prompter:  *prompter,
 		Output:    output,
 	}
 
-	return elasticIPCmd.executeElasticIPs(ctx, flagValues)
+	return command.executeElasticIPs(ctx, flagValues)
 }
 
 func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[string]any) error {

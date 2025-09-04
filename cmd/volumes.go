@@ -85,14 +85,14 @@ var volumesCmd = &cobra.Command{
 
 func runVolumeCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	// Create an instance of AWSCommand
-	volumeCmd := &AWSCommand{
+	command := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
 		Prompter:  *prompter,
 		Output:    output,
 	}
 
-	return volumeCmd.executeVolumes(ctx, flagValues)
+	return command.executeVolumes(ctx, flagValues)
 }
 
 func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {

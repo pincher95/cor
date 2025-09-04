@@ -73,7 +73,7 @@ var elbv2Cmd = &cobra.Command{
 			EC2: ec2Client,
 		}
 
-		return runElbv2Cmd(ctx, &prompterClient, output, awsClient, flagValues)
+		return runElbv2Cmd(ctx, prompterClient, output, awsClient, flagValues)
 	},
 }
 
@@ -81,19 +81,19 @@ func init() {
 	elbv2Cmd.Flags().String("filter-by-name", "", "The name of the elbv2 which matches an entire day.")
 }
 
-func runElbv2Cmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
+func runElbv2Cmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
 	// Create an instance of elbv2Command
-	elbCmd := &AWSCommand{
+	command := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
-		Prompter:  *prompter,
+		Prompter:  prompter,
 		Output:    output,
 	}
 
-	return elbCmd.execute(ctx, flagValues)
+	return command.executeElbv2(ctx, flagValues)
 }
 
-func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]any) error {
+func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]any) error {
 	// Create channels to send load balancers
 	loadBalancerChan := make(chan types.LoadBalancer, 50)
 	resultsChan := make(chan table.Row, 50)
@@ -109,8 +109,7 @@ func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]any) er
 		return nil
 	})
 
-	numWorkers := NumGoroutines
-	for range numWorkers {
+	for range NumGoroutines {
 		g.Go(func() error {
 			for {
 				select {
@@ -173,19 +172,19 @@ func (e *AWSCommand) execute(ctx context.Context, flagValues *map[string]any) er
 				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": tableRow[0].(string)})
 
 				// Delete Listeners
-				if err := e.deleteListeners(context.TODO(), aws.String(tableRow[1].(string))); err != nil {
+				if err := e.deleteListeners(ctx, aws.String(tableRow[1].(string))); err != nil {
 					e.Logger.LogError("Error deleting listeners", err, nil, false)
 					return err
 				}
 
 				// Delete Target Groups
-				if err := e.deleteTargetGroups(context.TODO(), strings.Split(tableRow[2].(string), "\n")); err != nil {
+				if err := e.deleteTargetGroups(ctx, strings.Split(tableRow[2].(string), "\n")); err != nil {
 					e.Logger.LogError("Error deleting target groups", err, nil, false)
 					return err
 				}
 
 				// Delete Load Balancer
-				_, err = e.AWSClient.DeleteLoadBalancer(context.TODO(), &elasticloadbalancingv2.DeleteLoadBalancerInput{
+				_, err = e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
 					LoadBalancerArn: aws.String(tableRow[1].(string)),
 				})
 				if err != nil {
@@ -397,7 +396,7 @@ func printLoadBalancerV2Table(tableRows *[]table.Row) error {
 		},
 	}
 
-	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "LoadBalancer ARN", "targerGroups without targets"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
+	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "LoadBalancer ARN", "targetGroups without targets"}, &[]table.SortBy{{Name: "LoadBalancer Name", Mode: table.Asc}}, &columnConfig)
 
 	return printerClient.PrintTextTable(tableRows)
 }

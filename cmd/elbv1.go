@@ -76,10 +76,11 @@ var elbv1Cmd = &cobra.Command{
 
 		// Start a goroutine to process load balancers
 		for lb := range loadBalancerChan {
+			lb := lb
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				tableRow, err := handleLoadBalancer(context.TODO(), &lb, client)
+				tableRow, err := handleLoadBalancer(ctx, &lb, client)
 				if err != nil {
 					errorChan <- err
 					return
@@ -125,7 +126,7 @@ var elbv1Cmd = &cobra.Command{
 					},
 				}
 
-				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "number of listeners", "instance unhealthy", "VPC ID"}, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}}, &columnConfig)
+				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "number of listeners", "instance unhealthy", "VPC ID"}, &[]table.SortBy{{Name: "LoadBalancer Name", Mode: table.Asc}}, &columnConfig)
 
 				if err := printerClient.PrintTextTable(&tableRows); err != nil {
 					logger.LogError("Error printing table", err, nil, false)

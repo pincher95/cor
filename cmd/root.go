@@ -61,6 +61,7 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(elasticIPsCmd)
 	rootCmd.AddCommand(elbv1Cmd)
 	rootCmd.AddCommand(elbv2Cmd)
+	rootCmd.AddCommand(autoscalingCmd)
 }
 
 func init() {

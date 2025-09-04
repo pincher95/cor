@@ -89,14 +89,14 @@ func runSnapshotCmd(ctx context.Context, prompter prompter.Client, output io.Wri
 	logger := logging.NewLogger()
 
 	// Create an instance of elbv2Command
-	snapshotCmd := &AWSCommand{
+	command := &AWSCommand{
 		AWSClient: awsClient,
 		Logger:    logger,
 		Prompter:  prompter,
 		Output:    output,
 	}
 
-	return snapshotCmd.executeSnapShot(ctx, flagValues)
+	return command.executeSnapShot(ctx, flagValues)
 }
 
 func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]any) error {
@@ -178,11 +178,78 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string
 				tableRows = append(tableRows, *row)
 			}
 
-			// Print the volume table
+			// Print the snapshot table
 			if err := printSnapshotTable(&tableRows); err != nil {
-				s.Logger.LogError("Error printing volume table", err, nil, false)
+				s.Logger.LogError("Error printing snapshot table", err, nil, false)
 				errorChan <- err
 			}
+
+			// Optional deletion if --delete is set
+			if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
+				confirm, err := s.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+				if err != nil {
+					s.Logger.LogError("Error during user prompt", err, nil, false)
+					return err
+				}
+				if confirm == nil {
+					s.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
+				} else if *confirm {
+					for _, row := range tableRows {
+						// Skip total row
+						name, ok := row[0].(string)
+						if !ok || name == "Total" {
+							continue
+						}
+						snapshotID, ok := row[1].(string)
+						if !ok || snapshotID == "" {
+							continue
+						}
+
+						// Skip if snapshot is used by any AMI
+						imgOut, err := s.AWSClient.EC2.DescribeImages(ctx, &ec2.DescribeImagesInput{
+							Owners: []string{"self"},
+							Filters: []types.Filter{{
+								Name:   aws.String("block-device-mapping.snapshot-id"),
+								Values: []string{snapshotID},
+							}},
+						})
+						if err != nil {
+							s.Logger.LogError("Error checking AMI usage for snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
+							return err
+						}
+						if len(imgOut.Images) > 0 {
+							s.Logger.LogInfo("Skipping snapshot in use by AMI", map[string]any{"SnapshotID": snapshotID})
+							continue
+						}
+
+						// Skip if snapshot is used by any volume
+						volOut, err := s.AWSClient.EC2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+							Filters: []types.Filter{{
+								Name:   aws.String("snapshot-id"),
+								Values: []string{snapshotID},
+							}},
+						})
+						if err != nil {
+							s.Logger.LogError("Error checking Volume usage for snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
+							return err
+						}
+						if len(volOut.Volumes) > 0 {
+							s.Logger.LogInfo("Skipping snapshot in use by Volume", map[string]any{"SnapshotID": snapshotID})
+							continue
+						}
+
+						s.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": snapshotID, "Name": name})
+						_, err = s.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshotID)})
+						if err != nil {
+							s.Logger.LogError("Error deleting snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
+							return err
+						}
+					}
+				} else if !*confirm {
+					s.Logger.LogInfo("Aborted.", nil)
+				}
+			}
+
 			return nil
 		case <-ctx.Done():
 			s.Logger.LogInfo("Operation canceled", nil)
@@ -249,6 +316,9 @@ func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, han
 	default:
 		for _, volumeWithTags := range handleVolumesIDs {
 			snapshotID := volumeWithTags.Volume.SnapshotId
+			if snapshotID == nil {
+				continue
+			}
 			if strings.Contains(*snapshotID, "snap") {
 				volumeSnapshotID[*snapshotID] = true
 			} else {
@@ -261,7 +331,6 @@ func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, han
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
-				snapshotVolumeID := snapshotWithTags.Snapshot.VolumeId
 				snapshotSize := snapshotWithTags.Snapshot.VolumeSize
 				tagMap := snapshotWithTags.TagMap
 				nameTag, ok := tagMap["Name"]
@@ -269,13 +338,12 @@ func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, han
 					nameTag = types.Tag{Value: aws.String("-")}
 				}
 
+				if snapshotWithTags.Snapshot.SnapshotId == nil {
+					continue
+				}
 				if !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created by CreateImage") || !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created for policy") {
 					if volumeSnapshotID[*snapshotWithTags.Snapshot.SnapshotId] {
-						tableRowChan <- &table.Row{
-							*nameTag.Value,
-							*snapshotVolumeID,
-							*snapshotSize,
-						}
+						tableRowChan <- &table.Row{*nameTag.Value, *snapshotWithTags.Snapshot.SnapshotId, *snapshotSize}
 						size += *snapshotSize
 					}
 				}

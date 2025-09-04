@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -49,6 +50,7 @@ type AWSClientImpl struct {
 	EC2 *ec2.Client
 	ELB *elasticloadbalancingv2.Client
 	STS *sts.Client
+	ASG *autoscaling.Client
 }
 
 func (c *AWSClientImpl) DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
@@ -86,6 +88,10 @@ func (c *AWSClientImpl) DescribeTargetHealth(ctx context.Context, params *elasti
 
 func (c *AWSClientImpl) GetCallerIdentity(ctx context.Context, params *sts.GetCallerIdentityInput, optFns ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
 	return c.STS.GetCallerIdentity(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DescribeAutoScalingGroups(ctx context.Context, params *autoscaling.DescribeAutoScalingGroupsInput, optFns ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+	return c.ASG.DescribeAutoScalingGroups(ctx, params, optFns...)
 }
 
 // CloudConfig is the configuration for the AWS client

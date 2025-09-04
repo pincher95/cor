@@ -89,19 +89,19 @@ var imagesCmd = &cobra.Command{
 			STS: stsClient,
 		}
 
-		return runImagesCmd(ctx, &prompterClient, output, awsClient, flagValues)
+		return runImagesCmd(ctx, prompterClient, output, awsClient, flagValues)
 	},
 }
 
-func runImagesCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	imagesCmd := &AWSCommand{
+func runImagesCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
+	command := &AWSCommand{
 		AWSClient: *awsClient,
 		Logger:    logging.NewLogger(),
-		Prompter:  *prompter,
+		Prompter:  prompter,
 		Output:    output,
 	}
 
-	return imagesCmd.executeImages(ctx, flagValues)
+	return command.executeImages(ctx, flagValues)
 }
 
 func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]any) error {
@@ -166,8 +166,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 	})
 
 	// Start worker pool for processing images concurrently
-	numWorkers := NumGoroutines
-	for range numWorkers {
+	for range NumGoroutines {
 		g.Go(func() error {
 			for {
 				select {
@@ -436,10 +435,7 @@ func (i *AWSCommand) waitForImageDeregistration(ctx context.Context, imageID str
 }
 
 func (i *AWSCommand) deleteImages(ctx context.Context, tableRows *[]table.Row) error {
-
-	userPrompter := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-
-	confirm, err := userPrompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+	confirm, err := i.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
 	if err != nil {
 		i.Logger.LogError("Error during user prompt", err, nil, false)
 		return err

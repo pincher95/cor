@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"log"
 	"os"
 )
@@ -26,13 +27,11 @@ func (l *Logger) LogError(message string, err error, context map[string]any, exi
 	if context != nil {
 		logMessage += " | Context: "
 		for key, value := range context {
-			logMessage += key + "=" + value.(string) + " "
+			logMessage += fmt.Sprintf("%s=%v ", key, value)
 		}
 	}
 	l.logger.Println(logMessage)
-	if exit {
-		os.Exit(1)
-	}
+	// Do not exit the process here; callers should decide on termination.
 }
 
 // LogInfo logs an informational message with context.
@@ -41,8 +40,7 @@ func (l *Logger) LogInfo(message string, context map[string]any) {
 	if context != nil {
 		logMessage += " | Context: "
 		for key, value := range context {
-			// Assuming all values in context are strings for simplicity. Consider type assertion or formatting for other types.
-			logMessage += key + "=" + value.(string) + " "
+			logMessage += fmt.Sprintf("%s=%v ", key, value)
 		}
 	}
 	l.logger.Println(logMessage)
