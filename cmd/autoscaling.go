@@ -1,17 +1,33 @@
+/*
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package cmd
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +45,11 @@ var autoscalingCmd = &cobra.Command{
 
 		// Retrieve global + command specific flags
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		flagValues, err := flags.GetFlags(flagRetriever, nil) // no extra flags yet
+		additionalFlags := []flags.Flag{
+			{Name: "filter-by-name", Type: "string"},
+			{Name: "force", Type: "bool"},
+		}
+		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
 			return err
 		}
@@ -46,13 +66,11 @@ var autoscalingCmd = &cobra.Command{
 			return err
 		}
 
-		// Create service clients
+		// Create service client
 		asgClient := autoscaling.NewFromConfig(*cfg)
-		stsClient := sts.NewFromConfig(*cfg)
 
 		awsClient := &handlers.AWSClientImpl{
 			ASG: asgClient,
-			STS: stsClient,
 		}
 
 		return runAutoscalingCmd(ctx, prompterClient, output, awsClient, flagValues)
@@ -71,20 +89,94 @@ func runAutoscalingCmd(ctx context.Context, prompter prompter.Client, output io.
 }
 
 func (b *AWSCommand) executeAutoscaling(ctx context.Context, flagValues *map[string]any) error {
-	// Placeholder: simply list Auto Scaling groups count for now
-	groups, err := b.AWSClient.ASG.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{})
-	if err != nil {
-		b.Logger.LogError("failed to describe autoscaling groups", err, nil, false)
-		return err
+	filterByName := (*flagValues)["filter-by-name"].(string)
+	force := (*flagValues)["force"].(bool)
+
+	doDelete := false
+	if (*flagValues)["delete"].(bool) {
+		confirm, err := b.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+		if err != nil {
+			b.Logger.LogError("Error during user prompt", err, nil, false)
+			return err
+		}
+		if confirm == nil || !*confirm {
+			b.Logger.LogInfo("Aborted.", nil)
+			return nil
+		}
+		doDelete = true
 	}
 
-	if _, err := fmt.Fprintf(b.Output, "Found %d Auto Scaling groups (functionality not fully implemented yet)\n", len(groups.AutoScalingGroups)); err != nil {
-		return err
+	paginator := autoscaling.NewDescribeAutoScalingGroupsPaginator(b.AWSClient.ASG, &autoscaling.DescribeAutoScalingGroupsInput{})
+
+	stream := printer.NewStreamTable(b.Output, true, []string{"AutoScalingGroup Name", "Min", "Desired", "Max", "Instances", "LBs", "TargetGroups"})
+	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	defer stream.Close()
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			b.Logger.LogError("failed to describe autoscaling groups", err, nil, false)
+			return err
+		}
+
+		for _, asg := range page.AutoScalingGroups {
+			name := aws.ToString(asg.AutoScalingGroupName)
+			if filterByName != "" && !strings.Contains(name, filterByName) {
+				continue
+			}
+
+			instanceCount := 0
+			if asg.Instances != nil {
+				instanceCount = len(asg.Instances)
+			}
+			lbCount := 0
+			if asg.LoadBalancerNames != nil {
+				lbCount = len(asg.LoadBalancerNames)
+			}
+			tgCount := 0
+			if asg.TargetGroupARNs != nil {
+				tgCount = len(asg.TargetGroupARNs)
+			}
+
+			desired := aws.ToInt32(asg.DesiredCapacity)
+			min := aws.ToInt32(asg.MinSize)
+			max := aws.ToInt32(asg.MaxSize)
+
+			// Strict orphan definition (safer):
+			// - no instances
+			// - desired==0 and min==0
+			// - not attached to any LB or TG
+			if instanceCount != 0 {
+				continue
+			}
+			if desired != 0 || min != 0 {
+				continue
+			}
+			if lbCount != 0 || tgCount != 0 {
+				continue
+			}
+
+			stream.WriteRow(name, min, desired, max, instanceCount, lbCount, tgCount)
+
+			if doDelete {
+				b.Logger.LogInfo("Deleting AutoScalingGroup", map[string]any{"AutoScalingGroupName": name, "ForceDelete": force})
+				if _, err := b.AWSClient.ASG.DeleteAutoScalingGroup(ctx, &autoscaling.DeleteAutoScalingGroupInput{
+					AutoScalingGroupName: aws.String(name),
+					ForceDelete:          aws.Bool(force),
+				}); err != nil {
+					b.Logger.LogError("Error deleting autoscaling group", err, map[string]any{"AutoScalingGroupName": name}, false)
+					return err
+				}
+			}
+		}
 	}
 
 	return nil
 }
 
 func init() {
-	// No command-specific flags yet – placeholder for future
+	autoscalingCmd.Flags().String("filter-by-name", "", "Filter by Auto Scaling Group name (substring match).")
+	autoscalingCmd.Flags().Bool("force", false, "Force delete ASG (use with caution).")
 }
+
+// Legacy pretty-table printer removed in favor of streaming output for low memory usage.

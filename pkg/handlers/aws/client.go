@@ -1,3 +1,19 @@
+/*
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package handlers
 
 import (
@@ -13,8 +29,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -51,6 +69,8 @@ type AWSClientImpl struct {
 	ELB *elasticloadbalancingv2.Client
 	STS *sts.Client
 	ASG *autoscaling.Client
+	RDS *rds.Client
+	CWL *cloudwatchlogs.Client
 }
 
 func (c *AWSClientImpl) DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
@@ -92,6 +112,38 @@ func (c *AWSClientImpl) GetCallerIdentity(ctx context.Context, params *sts.GetCa
 
 func (c *AWSClientImpl) DescribeAutoScalingGroups(ctx context.Context, params *autoscaling.DescribeAutoScalingGroupsInput, optFns ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
 	return c.ASG.DescribeAutoScalingGroups(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DescribeNatGateways(ctx context.Context, params *ec2.DescribeNatGatewaysInput, optFns ...func(*ec2.Options)) (*ec2.DescribeNatGatewaysOutput, error) {
+	return c.EC2.DescribeNatGateways(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DeleteNatGateway(ctx context.Context, params *ec2.DeleteNatGatewayInput, optFns ...func(*ec2.Options)) (*ec2.DeleteNatGatewayOutput, error) {
+	return c.EC2.DeleteNatGateway(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DescribeDBInstances(ctx context.Context, params *rds.DescribeDBInstancesInput, optFns ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error) {
+	return c.RDS.DescribeDBInstances(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DescribeDBSnapshots(ctx context.Context, params *rds.DescribeDBSnapshotsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error) {
+	return c.RDS.DescribeDBSnapshots(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DeleteDBInstance(ctx context.Context, params *rds.DeleteDBInstanceInput, optFns ...func(*rds.Options)) (*rds.DeleteDBInstanceOutput, error) {
+	return c.RDS.DeleteDBInstance(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DeleteDBSnapshot(ctx context.Context, params *rds.DeleteDBSnapshotInput, optFns ...func(*rds.Options)) (*rds.DeleteDBSnapshotOutput, error) {
+	return c.RDS.DeleteDBSnapshot(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DescribeLogGroups(ctx context.Context, params *cloudwatchlogs.DescribeLogGroupsInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
+	return c.CWL.DescribeLogGroups(ctx, params, optFns...)
+}
+
+func (c *AWSClientImpl) DeleteLogGroup(ctx context.Context, params *cloudwatchlogs.DeleteLogGroupInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DeleteLogGroupOutput, error) {
+	return c.CWL.DeleteLogGroup(ctx, params, optFns...)
 }
 
 // CloudConfig is the configuration for the AWS client
@@ -168,11 +220,6 @@ func authenticateAWSCredentialsFile(ctx context.Context, region string, profile 
 	)
 
 	if err != nil {
-		// Check if the error relates to expired credentials by calling sts GetCallerIdentity
-		if stsErr := checkIfExpired(ctx, cfg); stsErr != nil {
-			fmt.Fprintln(os.Stderr, "AWS credentials have expired. Please refresh your credentials.")
-			os.Exit(1)
-		}
 		return nil, err
 	}
 	return &cfg, nil
@@ -190,12 +237,8 @@ func authenticateEnvSecret(ctx context.Context, region string) (*aws.Config, err
 	return &cfg, nil
 }
 
-// Function to check if credentials are expired by making a simple call to STS
-func checkIfExpired(ctx context.Context, cfg aws.Config) error {
-	stsSvc := sts.NewFromConfig(cfg)
-	_, err := stsSvc.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	return err
-}
+// Note: we intentionally avoid calling os.Exit or making extra network calls here.
+// Callers can optionally validate credentials via STS if they want a preflight check.
 
 // Confirmation asks user for confirmation.
 // "y" and "Y" returns true and others are false.

@@ -1,5 +1,17 @@
 /*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 package cmd
 
@@ -12,10 +24,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
@@ -104,6 +116,21 @@ func runElasticIPsCmd(ctx context.Context, prompter *prompter.Client, output io.
 }
 
 func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[string]any) error {
+	// If deleting, confirm up-front so we can stream without buffering IDs.
+	doDelete := false
+	if (*flagValues)["delete"].(bool) {
+		confirm, err := a.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+		if err != nil {
+			a.Logger.LogError("Error during user prompt", err, nil, false)
+			return err
+		}
+		if confirm == nil || !*confirm {
+			a.Logger.LogInfo("Aborted.", nil)
+			return nil
+		}
+		doDelete = true
+	}
+
 	// Create a channel to process addresses
 	addressChan := make(chan addressWithTags, 10)
 	resultsChan := make(chan table.Row, 10)
@@ -153,7 +180,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 						if address.InstanceId == nil {
 							// Safely dereference pointers with nil checks
 							name := "-"
-							if nameTag, ok := utils.TagsToMap(address.Tags)["Name"]; ok {
+							if nameTag, ok := utils.TagsToMap(address.Tags)["Name"]; ok && nameTag.Value != nil {
 								name = *nameTag.Value
 							}
 
@@ -162,9 +189,15 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 								associationId = *address.AssociationId
 							}
 
-							elasticIP := *address.PublicIp
+							elasticIP := "-"
+							if address.PublicIp != nil {
+								elasticIP = *address.PublicIp
+							}
 
-							allocationId := *address.AllocationId
+							allocationId := "-"
+							if address.AllocationId != nil {
+								allocationId = *address.AllocationId
+							}
 
 							networkInterfaceId := "-"
 							if address.NetworkInterfaceId != nil {
@@ -179,14 +212,44 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 		})
 	}
 
-	// Result collector goroutine: concurrently reads from resultsChan.
-	resultCollectorDone := make(chan struct{})
-	tableRows := make([]table.Row, 0)
+	// Printer goroutine: stream output as rows arrive.
+	resultDone := make(chan struct{})
 	go func() {
-		for res := range resultsChan {
-			tableRows = append(tableRows, res)
+		stream := printer.NewStreamTable(a.Output, true, []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"})
+		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+		defer stream.Close()
+
+		for row := range resultsChan {
+			stream.WriteRow(row...)
+
+			if doDelete {
+				// Expect: Name, AllocationID, PublicIP, AssociationID, NetworkInterfaceID
+				if len(row) < 3 {
+					continue
+				}
+
+				allocationID, _ := row[1].(string)
+				publicIP, _ := row[2].(string)
+
+				// Prefer AllocationId (VPC EIPs), fall back to PublicIp (EC2-Classic).
+				input := &ec2.ReleaseAddressInput{}
+				if allocationID != "" && allocationID != "-" {
+					input.AllocationId = aws.String(allocationID)
+				} else if publicIP != "" && publicIP != "-" {
+					input.PublicIp = aws.String(publicIP)
+				} else {
+					continue
+				}
+
+				a.Logger.LogInfo("Releasing Elastic IP", map[string]any{"AllocationId": allocationID, "PublicIp": publicIP})
+				if _, err := a.AWSClient.EC2.ReleaseAddress(ctx, input); err != nil {
+					a.Logger.LogError("Error releasing Elastic IP", err, map[string]any{"AllocationId": allocationID, "PublicIp": publicIP}, false)
+					// fail-fast
+					break
+				}
+			}
 		}
-		close(resultCollectorDone)
+		close(resultDone)
 	}()
 
 	// Wait for the describer and workers to finish.
@@ -197,14 +260,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 
 	// All worker and describer goroutines are done; close the results channel.
 	close(resultsChan)
-	// Wait for the collector to finish.
-	<-resultCollectorDone
-
-	// Print the table
-	if err := printElasticIPsTable(&tableRows); err != nil {
-		a.Logger.LogError("Error printing elastic IPs's table", err, nil, false)
-		return err
-	}
+	<-resultDone
 
 	return nil
 }
@@ -253,35 +309,4 @@ func (a *AWSCommand) describeAddresses(ctx context.Context, addressChan chan<- a
 // 	}, nil
 // }
 
-func printElasticIPsTable(tableRows *[]table.Row) error {
-
-	columnConfig := getElasticIPsColumnConfig()
-	sortConfig := []table.SortBy{{Name: "Name", Mode: table.Asc}}
-
-	return printTable(columnConfig, &table.Row{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"}, tableRows, &sortConfig)
-}
-
-func getElasticIPsColumnConfig() *[]table.ColumnConfig {
-	return &[]table.ColumnConfig{
-		{
-			Name:        "Name",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Allocation ID",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Allocated Public address",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Association ID",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Network interface ID",
-			AlignHeader: text.AlignCenter,
-		},
-	}
-}
+// Legacy pretty-table printer removed in favor of streaming output for low memory usage.

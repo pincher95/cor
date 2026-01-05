@@ -1,16 +1,28 @@
+/*
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package utils
 
 import (
-	"fmt"
-
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
 // Checks if string in slice returns index and bool
 func SliceContainsWithIndex[T comparable](slice []T, search T) (int, bool) {
 	for i, v := range slice {
-		fmt.Println("Name: ", v)
-		fmt.Println("Element: ", v)
 		if v == search {
 			return i, true
 		}
@@ -50,6 +62,9 @@ func SliceChunkBy[T any](items []T, chunkSize int) (chunks [][]T) {
 func TagsToMap(tags []types.Tag) map[string]types.Tag {
 	tagMap := make(map[string]types.Tag)
 	for _, tag := range tags {
+		if tag.Key == nil {
+			continue
+		}
 		tagMap[*tag.Key] = tag
 	}
 	return tagMap

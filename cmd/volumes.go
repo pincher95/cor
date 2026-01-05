@@ -1,5 +1,17 @@
 /*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 package cmd
 
@@ -14,10 +26,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
@@ -96,6 +108,21 @@ func runVolumeCmd(ctx context.Context, prompter *prompter.Client, output io.Writ
 }
 
 func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
+	// If deleting, confirm up-front so we can stream without buffering IDs.
+	doDelete := false
+	if (*flagValues)["delete"].(bool) {
+		confirm, err := v.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+		if err != nil {
+			v.Logger.LogError("Error during user prompt", err, nil, false)
+			return err
+		}
+		if confirm == nil || !*confirm {
+			v.Logger.LogInfo("Aborted.", nil)
+			return nil
+		}
+		doDelete = true
+	}
+
 	// Create a channel to process volumes
 	volumeWithTagsChan := make(chan volumeWithTags, 10)
 	resultsChan := make(chan volumeResult, 10)
@@ -168,13 +195,34 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 
 	// Result collector goroutine: concurrently reads from resultsChan.
 	resultCollectorDone := make(chan struct{})
-	tableRows := make([]table.Row, 0)
 	var totalSize int32
 	go func() {
+		stream := printer.NewStreamTable(v.Output, true, []string{"Name", "Volume ID", "Snapshot ID", "Size"})
+		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+		defer stream.Close()
+
 		for res := range resultsChan {
-			tableRows = append(tableRows, res.row)
+			stream.WriteRow(res.row...)
 			totalSize += res.size
+
+			if doDelete {
+				// row = Name, VolumeId, SnapshotId, Size
+				if len(res.row) < 2 {
+					continue
+				}
+				volID, _ := res.row[1].(string)
+				if volID == "" {
+					continue
+				}
+				v.Logger.LogInfo("Deleting Volumes", map[string]any{"VolumeId": volID})
+				if _, err := v.AWSClient.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volID)}); err != nil {
+					v.Logger.LogError("Error deleting volume", err, map[string]any{"VolumeId": volID}, false)
+					// Cancel the group by returning; main goroutine will see ctx.Done via errgroup.
+					break
+				}
+			}
 		}
+		stream.WriteRow("Total", "", "", totalSize)
 		close(resultCollectorDone)
 	}()
 
@@ -189,20 +237,6 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	// Wait for the collector to finish.
 	<-resultCollectorDone
 
-	// Append total row
-	tableRows = append(tableRows, table.Row{"", "", "", totalSize, "Total"})
-
-	// Print the table
-	if err := printVolumeTable(&tableRows); err != nil {
-		v.Logger.LogError("Error printing volume table", err, nil, false)
-		return err
-	}
-
-	if (*flagValues)["delete"].(bool) {
-		if err := v.deleteVolumes(ctx, &tableRows); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -210,50 +244,9 @@ func init() {
 	volumesCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day.")
 }
 
-// deleteVolumes deletes the volumes based on the user confirmation
-func (v *AWSCommand) deleteVolumes(ctx context.Context, tableRows *[]table.Row) error {
-	confirm, err := v.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-	if err != nil {
-		v.Logger.LogError("Error during user prompt", err, nil, false)
-		return err
-	}
-
-	if confirm == nil {
-		v.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
-		return err
-	} else if *confirm {
-		for _, tableRow := range *tableRows {
-			// Skip the last row which is the total
-			if total, ok := tableRow[4].(string); ok && total == "Total" {
-				continue
-			}
-			// Delete the volume
-			v.Logger.LogInfo("Deleting Volumes", map[string]any{"VolumeName": tableRow[0].(string)})
-			_, err := v.AWSClient.DeleteVolume(ctx, &ec2.DeleteVolumeInput{
-				VolumeId: aws.String(tableRow[1].(string)),
-			})
-			if err != nil {
-				v.Logger.LogError("Error deleting volume", err, nil, false)
-				return err
-			}
-		}
-	} else if !*confirm {
-		v.Logger.LogInfo("Aborted.", nil)
-	}
-
-	return nil
-}
-
 // DescribeVolumes describes the volumes based on the filter provided
 func (v *AWSCommand) DescribeVolumes(ctx context.Context, volumeWithTagsChan chan<- volumeWithTags, filters *[]types.Filter) error {
-	defer func() {
-		if recover() != nil {
-			// Prevent panic if the channel is already closed
-			v.Logger.LogError("Channel `volumeWithTagsChan` closed", nil, nil, false)
-
-		}
-		close(volumeWithTagsChan)
-	}()
+	defer close(volumeWithTagsChan)
 
 	// If filters are nil, create an empty filter
 	if filters == nil {
@@ -294,35 +287,4 @@ func handleVolume(volume volumeWithTags) (*volumeWithTags, error) {
 		Volume: volume.Volume,
 		TagMap: volume.TagMap,
 	}, nil
-}
-
-// getColumnConfig returns the column configuration for the volume table
-func getVolumeColumnConfig() *[]table.ColumnConfig {
-	return &[]table.ColumnConfig{
-		{
-			Name:        "Name",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Volume ID",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Snapshot ID",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Size",
-			AlignHeader: text.AlignCenter,
-		},
-	}
-}
-
-// printVolumeTable prints the volume table
-func printVolumeTable(tableRows *[]table.Row) error {
-
-	columnConfig := getVolumeColumnConfig()
-	sortConfig := []table.SortBy{{Name: "Name", Mode: table.Dsc}}
-
-	return printTable(columnConfig, &table.Row{"Name", "Volume ID", "Snapshot ID", "Size"}, tableRows, &sortConfig)
 }

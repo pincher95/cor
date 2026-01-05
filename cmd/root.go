@@ -1,5 +1,17 @@
 /*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 package cmd
 
@@ -10,11 +22,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -59,9 +68,14 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(snapshotsCmd)
 	rootCmd.AddCommand(imagesCmd)
 	rootCmd.AddCommand(elasticIPsCmd)
+	rootCmd.AddCommand(enisCmd)
+	rootCmd.AddCommand(targetgroupsCmd)
 	rootCmd.AddCommand(elbv1Cmd)
 	rootCmd.AddCommand(elbv2Cmd)
 	rootCmd.AddCommand(autoscalingCmd)
+	rootCmd.AddCommand(natgatewaysCmd)
+	rootCmd.AddCommand(rdsCmd)
+	rootCmd.AddCommand(logsCmd)
 }
 
 func init() {
@@ -77,13 +91,13 @@ func init() {
 	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentials file profile")
 	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication methos AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
 	rootCmd.PersistentFlags().Bool("delete", false, "Delete Orphant resources")
+	rootCmd.PersistentFlags().String("sort-by", "", "Sort output by column name (buffers results in memory; disables streaming)")
+	rootCmd.PersistentFlags().Bool("sort-desc", false, "Sort output in descending order")
 	rootCmd.PersistentFlags().Duration("timeout", 0, "Timeout in seconds for the command execution.")
 
 	// imagesCmd.PersistentFlags().String("creation-date", "", "The time when the image was created, in the ISO 8601 format in the UTC time zone (YYYY-MM-DDThh:mm:ss.sssZ), for example, 2021-09-29T11:04:43.305Z . You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day")
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// NOTE: keep root flags minimal; subcommands provide the functional surface area.
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -113,12 +127,4 @@ func initConfig() {
 // GetRootCommand returns the root command
 func GetRootCommand() *cobra.Command {
 	return rootCmd
-}
-
-// printTable prints the commands table
-func printTable(columnConfig *[]table.ColumnConfig, tableHeader *table.Row, tableRows *[]table.Row, sort *[]table.SortBy) error {
-
-	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), tableHeader, sort, columnConfig)
-
-	return printerClient.PrintTextTable(tableRows)
 }

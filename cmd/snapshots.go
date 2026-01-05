@@ -1,5 +1,17 @@
 /*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 package cmd
 
@@ -8,26 +20,18 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
-
-type snapshotWithTags struct {
-	Snapshot types.Snapshot
-	TagMap   map[string]types.Tag
-}
 
 // snapshotsCmd represents the snapshots command
 var snapshotsCmd = &cobra.Command{
@@ -55,7 +59,7 @@ var snapshotsCmd = &cobra.Command{
 
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			return ctx.Err()
+			return err
 		}
 
 		cloudConfig := &handlers.CloudConfig{
@@ -66,17 +70,14 @@ var snapshotsCmd = &cobra.Command{
 
 		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			return ctx.Err()
+			return err
 		}
 
 		// Create a new EC2 client
 		ec2Client := ec2.NewFromConfig(*cfg)
-		// Create a new STS client
-		stsClient := sts.NewFromConfig(*cfg)
 
 		awsClient := &handlers.AWSClientImpl{
 			EC2: ec2Client,
-			STS: stsClient,
 		}
 
 		return runSnapshotCmd(ctx, prompterClient, output, *awsClient, flagValues)
@@ -100,162 +101,94 @@ func runSnapshotCmd(ctx context.Context, prompter prompter.Client, output io.Wri
 }
 
 func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]any) error {
-	// Create channels to send snapshots and volumes
-	snapshotChan := make(chan snapshotWithTags, 500)
-	volumeIDsChan := make(chan volumeWithTags, 500)
-	tableRowChan := make(chan *table.Row, 100)
-	errorChan := make(chan error, 1)
-	doneChan := make(chan struct{})
-
-	selfAccount, err := s.AWSClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	if err != nil {
-		s.Logger.LogError("Failed loading AWS client config", err, nil, false)
-		errorChan <- err
+	// If deleting, confirm up-front so we can stream without buffering IDs.
+	doDelete := false
+	if (*flagValues)["delete"].(bool) {
+		confirm, err := s.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+		if err != nil {
+			s.Logger.LogError("Error during user prompt", err, nil, false)
+			return err
+		}
+		if confirm == nil || !*confirm {
+			s.Logger.LogInfo("Aborted.", nil)
+			return nil
+		}
+		doDelete = true
 	}
 
-	var wg sync.WaitGroup
-	var tableRows []table.Row
-	var handleSnapshots []snapshotWithTags
-	var handleVolumesIDs []volumeWithTags
+	// Precompute usage sets (needed to accurately filter orphan snapshots).
+	usedByImages, err := s.collectSnapshotsUsedByImages(ctx)
+	if err != nil {
+		return err
+	}
 
-	// Start a goroutine to process volumes
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := s.DescribeVolumes(ctx, volumeIDsChan, nil); err != nil {
-			errorChan <- err
-			return
-		}
-		// Close the channel after sending all snapshots
-		for volumeWithTags := range volumeIDsChan {
-			handleVolumesIDs = append(handleVolumesIDs, volumeWithTags)
-		}
-	}()
-
-	// Start a goroutine to process snapshots
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		filter := []types.Filter{
-			{
-				Name:   aws.String("owner-id"),
-				Values: []string{*selfAccount.Account},
-			},
-			{
-				Name:   aws.String("tag:Name"),
-				Values: []string{(*flagValues)["filter-by-name"].(string)},
-			},
-		}
-		if err := s.describeSnapshots(ctx, snapshotChan, filter); err != nil {
-			errorChan <- err
-			return
-		}
-		for snapshotWithTags := range snapshotChan {
-			handleSnapshots = append(handleSnapshots, snapshotWithTags)
-		}
-	}()
-
-	// Start a goroutine to wait for all processing to complete
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	for {
-		select {
-		case err := <-errorChan:
-			// s.Logger.LogError("Error during snapshot processing", err, nil, false)
+	usedByVolumes := make(map[string]bool, 1024)
+	volPaginator := ec2.NewDescribeVolumesPaginator(s.AWSClient.EC2, &ec2.DescribeVolumesInput{})
+	for volPaginator.HasMorePages() {
+		page, err := volPaginator.NextPage(ctx)
+		if err != nil {
 			return err
-		case <-doneChan:
-			// close(tableRowChan)
-			go func() {
-				if err := handlerSnapshot(ctx, handleVolumesIDs, handleSnapshots, tableRowChan); err != nil {
-					s.Logger.LogError("Error handling snapshots", err, nil, false)
-					errorChan <- err
-				}
-			}()
-			for row := range tableRowChan {
-				tableRows = append(tableRows, *row)
+		}
+		for _, vol := range page.Volumes {
+			if vol.SnapshotId != nil {
+				usedByVolumes[*vol.SnapshotId] = true
+			}
+		}
+	}
+
+	// Stream output
+	stream := printer.NewStreamTable(s.Output, true, []string{"Name", "Snapshot ID", "Size"})
+	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	defer stream.Close()
+
+	var totalSize int32
+	filterByName := (*flagValues)["filter-by-name"].(string)
+	snapFilters := []types.Filter{{Name: aws.String("tag:Name"), Values: []string{filterByName}}}
+	snapPaginator := ec2.NewDescribeSnapshotsPaginator(s.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
+		OwnerIds: []string{"self"},
+		Filters:  snapFilters,
+	})
+
+	for snapPaginator.HasMorePages() {
+		page, err := snapPaginator.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		for _, snap := range page.Snapshots {
+			if snap.SnapshotId == nil || snap.VolumeSize == nil {
+				continue
+			}
+			snapshotID := *snap.SnapshotId
+
+			desc := aws.ToString(snap.Description)
+			if strings.Contains(desc, "Created by CreateImage") || strings.Contains(desc, "Created for policy") {
+				continue
+			}
+			if usedByImages[snapshotID] || usedByVolumes[snapshotID] {
+				continue
 			}
 
-			// Print the snapshot table
-			if err := printSnapshotTable(&tableRows); err != nil {
-				s.Logger.LogError("Error printing snapshot table", err, nil, false)
-				errorChan <- err
+			name := "-"
+			if nameTag, ok := utils.TagsToMap(snap.Tags)["Name"]; ok && nameTag.Value != nil {
+				name = *nameTag.Value
 			}
 
-			// Optional deletion if --delete is set
-			if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
-				confirm, err := s.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-				if err != nil {
-					s.Logger.LogError("Error during user prompt", err, nil, false)
+			stream.WriteRow(name, snapshotID, *snap.VolumeSize)
+			totalSize += *snap.VolumeSize
+
+			if doDelete {
+				s.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": snapshotID, "Name": name})
+				if _, err := s.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshotID)}); err != nil {
+					s.Logger.LogError("Error deleting snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
 					return err
 				}
-				if confirm == nil {
-					s.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
-				} else if *confirm {
-					for _, row := range tableRows {
-						// Skip total row
-						name, ok := row[0].(string)
-						if !ok || name == "Total" {
-							continue
-						}
-						snapshotID, ok := row[1].(string)
-						if !ok || snapshotID == "" {
-							continue
-						}
-
-						// Skip if snapshot is used by any AMI
-						imgOut, err := s.AWSClient.EC2.DescribeImages(ctx, &ec2.DescribeImagesInput{
-							Owners: []string{"self"},
-							Filters: []types.Filter{{
-								Name:   aws.String("block-device-mapping.snapshot-id"),
-								Values: []string{snapshotID},
-							}},
-						})
-						if err != nil {
-							s.Logger.LogError("Error checking AMI usage for snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
-							return err
-						}
-						if len(imgOut.Images) > 0 {
-							s.Logger.LogInfo("Skipping snapshot in use by AMI", map[string]any{"SnapshotID": snapshotID})
-							continue
-						}
-
-						// Skip if snapshot is used by any volume
-						volOut, err := s.AWSClient.EC2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
-							Filters: []types.Filter{{
-								Name:   aws.String("snapshot-id"),
-								Values: []string{snapshotID},
-							}},
-						})
-						if err != nil {
-							s.Logger.LogError("Error checking Volume usage for snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
-							return err
-						}
-						if len(volOut.Volumes) > 0 {
-							s.Logger.LogInfo("Skipping snapshot in use by Volume", map[string]any{"SnapshotID": snapshotID})
-							continue
-						}
-
-						s.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": snapshotID, "Name": name})
-						_, err = s.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshotID)})
-						if err != nil {
-							s.Logger.LogError("Error deleting snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
-							return err
-						}
-					}
-				} else if !*confirm {
-					s.Logger.LogInfo("Aborted.", nil)
-				}
 			}
-
-			return nil
-		case <-ctx.Done():
-			s.Logger.LogInfo("Operation canceled", nil)
-			return ctx.Err()
 		}
 	}
+
+	// Total
+	stream.WriteRow("Total", "", totalSize)
+	return nil
 }
 
 func init() {
@@ -273,104 +206,34 @@ func init() {
 	snapshotsCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ).")
 }
 
-// describeSnapshots returns a list of snapshots owned by the account
-func (s *AWSCommand) describeSnapshots(ctx context.Context, snapshotChan chan<- snapshotWithTags, filter []types.Filter) error {
-	defer close(snapshotChan)
-
-	// Create a paginator for Snapshots owned by self
-	paginator := ec2.NewDescribeSnapshotsPaginator(s.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
-		MaxResults: aws.Int32(500),
-		Filters:    filter,
+func (s *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[string]bool, error) {
+	used := make(map[string]bool)
+	paginator := ec2.NewDescribeImagesPaginator(s.AWSClient.EC2, &ec2.DescribeImagesInput{
+		Owners:            []string{"self"},
+		IncludeDeprecated: aws.Bool(true),
+		IncludeDisabled:   aws.Bool(true),
 	})
 
-	// Iterate over the pages
+	pages := 0
+	images := 0
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
-
-		// Send snapshots to the channel
-		for _, snapshot := range page.Snapshots {
-			// Convert tags to a map
-			tagMap := utils.TagsToMap(snapshot.Tags)
-			snapshotChan <- snapshotWithTags{Snapshot: snapshot, TagMap: tagMap}
+		pages++
+		images += len(page.Images)
+		if pages%25 == 0 {
+			s.Logger.LogInfo("Scanning AMIs for snapshot usage…", map[string]any{"pages": pages, "images": images})
 		}
-	}
-	return nil
-}
-
-// handlerSnapshot processes the snapshots and volumes
-func handlerSnapshot(ctx context.Context, handleVolumesIDs []volumeWithTags, handleSnapshots []snapshotWithTags, tableRowChan chan<- *table.Row) error {
-	defer close(tableRowChan)
-
-	// Create a map to store the volume IDs
-	volumeSnapshotID := make(map[string]bool)
-
-	// Create a slice to store the total size of all volumes
-	size := int32(0)
-	// Process volume IDs
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		for _, volumeWithTags := range handleVolumesIDs {
-			snapshotID := volumeWithTags.Volume.SnapshotId
-			if snapshotID == nil {
-				continue
-			}
-			if strings.Contains(*snapshotID, "snap") {
-				volumeSnapshotID[*snapshotID] = true
-			} else {
-				volumeSnapshotID[*snapshotID] = false
-			}
-		}
-
-		for _, snapshotWithTags := range handleSnapshots {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				snapshotSize := snapshotWithTags.Snapshot.VolumeSize
-				tagMap := snapshotWithTags.TagMap
-				nameTag, ok := tagMap["Name"]
-				if !ok {
-					nameTag = types.Tag{Value: aws.String("-")}
-				}
-
-				if snapshotWithTags.Snapshot.SnapshotId == nil {
-					continue
-				}
-				if !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created by CreateImage") || !strings.Contains(*snapshotWithTags.Snapshot.Description, "Created for policy") {
-					if volumeSnapshotID[*snapshotWithTags.Snapshot.SnapshotId] {
-						tableRowChan <- &table.Row{*nameTag.Value, *snapshotWithTags.Snapshot.SnapshotId, *snapshotSize}
-						size += *snapshotSize
-					}
+		for _, image := range page.Images {
+			for _, mapping := range image.BlockDeviceMappings {
+				if mapping.Ebs != nil && mapping.Ebs.SnapshotId != nil {
+					used[*mapping.Ebs.SnapshotId] = true
 				}
 			}
 		}
-		tableRowChan <- &table.Row{"Total", "", size}
-	}
-	return nil
-}
-
-// printSnapshotTable prints the snapshot table
-func printSnapshotTable(tableRows *[]table.Row) error {
-
-	columnConfig := []table.ColumnConfig{
-		{
-			Name:        "Name",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Snapshot ID",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "Size",
-			AlignHeader: text.AlignCenter,
-		},
 	}
 
-	return printTable(&columnConfig, &table.Row{"Name", "Snapshot ID", "Size"}, tableRows, &[]table.SortBy{{Name: "creation date", Mode: table.Asc}})
+	return used, nil
 }

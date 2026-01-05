@@ -1,5 +1,17 @@
 /*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 package cmd
 
@@ -12,7 +24,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing/types"
 	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
@@ -60,13 +71,14 @@ var elbv1Cmd = &cobra.Command{
 		tableRowChan := make(chan *table.Row, 100)
 		errorChan := make(chan error, 1)
 
-		// Create a slice of table.Row
-		var tableRows []table.Row
+		stream := printer.NewStreamTable(os.Stdout, true, []string{"LoadBalancer Name", "number of listeners", "instance unhealthy", "VPC ID"})
+		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+		defer stream.Close()
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := describeLoadBalancers(context.TODO(), client, loadBalancerChan); err != nil {
+			if err := describeLoadBalancers(ctx, client, loadBalancerChan); err != nil {
 				errorChan <- err
 				close(loadBalancerChan)
 				return
@@ -102,36 +114,21 @@ var elbv1Cmd = &cobra.Command{
 			case err := <-errorChan:
 				logger.LogError("Error during loadbalancer processing", err, nil, true)
 				return err
+			case row := <-tableRowChan:
+				if row != nil {
+					if len(*row) > 0 {
+						stream.WriteRow((*row)...)
+					}
+				}
 			case <-doneChan:
 				close(tableRowChan)
 				for row := range tableRowChan {
-					tableRows = append(tableRows, *row)
+					if row == nil || len(*row) == 0 {
+						continue
+					}
+					stream.WriteRow((*row)...)
 				}
-				columnConfig := []table.ColumnConfig{
-					{
-						Name:        "LoadBalancer Name",
-						AlignHeader: text.AlignCenter,
-					},
-					{
-						Name:        "number of listeners",
-						AlignHeader: text.AlignCenter,
-					},
-					{
-						Name:        "instance unhealthy",
-						AlignHeader: text.AlignCenter,
-					},
-					{
-						Name:        "VPC ID",
-						AlignHeader: text.AlignCenter,
-					},
-				}
-
-				printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "number of listeners", "instance unhealthy", "VPC ID"}, &[]table.SortBy{{Name: "LoadBalancer Name", Mode: table.Asc}}, &columnConfig)
-
-				if err := printerClient.PrintTextTable(&tableRows); err != nil {
-					logger.LogError("Error printing table", err, nil, false)
-				}
-				return err
+				return nil
 			}
 		}
 	},

@@ -1,5 +1,17 @@
 /*
-Copyright © 2024 NAME HERE <EMAIL ADDRESS>
+Copyright 2024 Elastic Scaler Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 package cmd
 
@@ -15,7 +27,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/jedib0t/go-pretty/v6/text"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
@@ -94,6 +105,21 @@ func runElbv2Cmd(ctx context.Context, prompter prompter.Client, output io.Writer
 }
 
 func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]any) error {
+	// If deleting, confirm up-front so we can stream without buffering IDs.
+	doDelete := false
+	if (*flagValues)["delete"].(bool) {
+		confirm, err := e.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
+		if err != nil {
+			e.Logger.LogError("Error during user prompt", err, nil, false)
+			return err
+		}
+		if confirm == nil || !*confirm {
+			e.Logger.LogInfo("Aborted.", nil)
+			return nil
+		}
+		doDelete = true
+	}
+
 	// Create channels to send load balancers
 	loadBalancerChan := make(chan types.LoadBalancer, 50)
 	resultsChan := make(chan table.Row, 50)
@@ -131,14 +157,52 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 		})
 	}
 
-	// Result collector goroutine: concurrently reads from resultsChan.
-	resultCollectorDone := make(chan struct{})
-	tableRows := make([]table.Row, 0)
+	// Stream output + optional delete
+	printDone := make(chan error, 1)
 	go func() {
-		for res := range resultsChan {
-			tableRows = append(tableRows, res)
+		stream := printer.NewStreamTable(e.Output, true, []string{"LoadBalancer Name", "LoadBalancer ARN", "targetGroups without targets"})
+		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+		defer stream.Close()
+
+		for row := range resultsChan {
+			stream.WriteRow(row...)
+
+			if doDelete {
+				// row: Name, Arn, targetGroupNames (newline separated)
+				if len(row) < 3 {
+					continue
+				}
+				lbName, _ := row[0].(string)
+				lbArn, _ := row[1].(string)
+				tgNames, _ := row[2].(string)
+				if lbArn == "" {
+					continue
+				}
+
+				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": lbName})
+
+				// Delete listeners
+				if err := e.deleteListeners(ctx, aws.String(lbArn)); err != nil {
+					printDone <- err
+					return
+				}
+
+				// Delete target groups by name
+				if err := e.deleteTargetGroups(ctx, strings.Split(tgNames, "\n")); err != nil {
+					printDone <- err
+					return
+				}
+
+				// Delete load balancer
+				if _, err := e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
+					LoadBalancerArn: aws.String(lbArn),
+				}); err != nil {
+					printDone <- err
+					return
+				}
+			}
 		}
-		close(resultCollectorDone)
+		printDone <- nil
 	}()
 
 	// Wait for the describer and workers to finish.
@@ -149,52 +213,9 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 
 	// All worker and describer goroutines are done; close the results channel.
 	close(resultsChan)
-	// Wait for the collector to finish.
-	<-resultCollectorDone
-
-	// Print table
-	if err := printLoadBalancerV2Table(&tableRows); err != nil {
-		e.Logger.LogError("Error printing table", err, nil, false)
+	if err := <-printDone; err != nil {
+		e.Logger.LogError("Error streaming/deleting elbv2", err, nil, false)
 		return err
-	}
-
-	if (*flagValues)["delete"].(bool) && len(tableRows) > 0 {
-		confirm, err := e.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			e.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-
-		if confirm == nil {
-			e.Logger.LogInfo("Invalid response. Please enter 'yes' or 'no'.", nil)
-		} else if *confirm {
-			for _, tableRow := range tableRows {
-				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": tableRow[0].(string)})
-
-				// Delete Listeners
-				if err := e.deleteListeners(ctx, aws.String(tableRow[1].(string))); err != nil {
-					e.Logger.LogError("Error deleting listeners", err, nil, false)
-					return err
-				}
-
-				// Delete Target Groups
-				if err := e.deleteTargetGroups(ctx, strings.Split(tableRow[2].(string), "\n")); err != nil {
-					e.Logger.LogError("Error deleting target groups", err, nil, false)
-					return err
-				}
-
-				// Delete Load Balancer
-				_, err = e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
-					LoadBalancerArn: aws.String(tableRow[1].(string)),
-				})
-				if err != nil {
-					e.Logger.LogError("Error deleting loadbalancer", err, nil, false)
-					return err
-				}
-			}
-		} else if !*confirm {
-			e.Logger.LogInfo("Aborted.", nil)
-		}
 	}
 
 	return nil
@@ -379,27 +400,7 @@ func (e *AWSCommand) deleteTargetGroups(ctx context.Context, targetGroupNames []
 	return nil
 }
 
-func printLoadBalancerV2Table(tableRows *[]table.Row) error {
-
-	columnConfig := []table.ColumnConfig{
-		{
-			Name:        "LoadBalancer Name",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "LoadBalancer ARN",
-			AlignHeader: text.AlignCenter,
-		},
-		{
-			Name:        "targetGroups without targets",
-			AlignHeader: text.AlignCenter,
-		},
-	}
-
-	printerClient := printer.NewPrinter(os.Stdout, aws.Bool(true), &table.Row{"LoadBalancer Name", "LoadBalancer ARN", "targetGroups without targets"}, &[]table.SortBy{{Name: "LoadBalancer Name", Mode: table.Asc}}, &columnConfig)
-
-	return printerClient.PrintTextTable(tableRows)
-}
+// Legacy pretty-table printer removed in favor of streaming output for low memory usage.
 
 // checkInstanceExists verifies via the EC2 API whether an instance exists with the provided IP address.
 // If no instance is found, the target is considered invalid.
