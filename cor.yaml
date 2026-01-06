@@ -1,0 +1,40 @@
+#
+# Example COR config file.
+#
+# By default COR reads from: $HOME/.cor.yaml
+# You can override via: cor --config /path/to/cor.yaml <command>
+#
+
+# ---- Global options (match CLI flag names) ----
+region: us-east-1
+profile: default
+auth-method: AWS_CREDENTIALS_FILE # or: ENV_SECRET
+
+# Danger zone: enabling delete here means `--delete` default becomes true unless overridden.
+delete: false
+
+# Sorting buffers output in memory (disables streaming).
+sort-by: "" # e.g. "Name"
+sort-desc: false
+
+# ---- Command-specific options (optional) ----
+filter-by-name: "*" # used by several commands (volumes/images/snapshots/enis/elasticips/...)
+
+# images:
+creation-date-before: "" # YYYY-MM-DD
+creation-date-after: "" # YYYY-MM-DD
+include-used-by-instance: false
+include-used-by-launch-template: false
+
+# natgateways:
+filter-by-state: available
+
+# targetgroups:
+include-attached: false
+
+# autoscaling:
+force: false
+
+# rds:
+include-instances: true
+include-snapshots: true

@@ -42,13 +42,8 @@ type addressWithTags struct {
 // elasticaddressesCmd represents the elasticaddresses command
 var elasticIPsCmd = &cobra.Command{
 	Use:   "elasticips",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "List and optionally release unassociated Elastic IPs",
+	Long:  `List Elastic IP addresses that are not associated to any instance/network interface and optionally release them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Create prompter using the prompter package
 		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
@@ -100,7 +95,7 @@ to quickly create a Cobra application.`,
 }
 
 func init() {
-	elasticIPsCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day.")
+	elasticIPsCmd.Flags().String("filter-by-name", "*", "Filter Elastic IPs by tag:Name (wildcards supported, e.g. 'foo*').")
 }
 
 func runElasticIPsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {

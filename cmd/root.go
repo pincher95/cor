@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
@@ -116,6 +117,10 @@ func initConfig() {
 		viper.SetConfigName(".cor")
 	}
 
+	// Support config/env overrides for flags (hyphens -> underscores) with a stable prefix.
+	// Example: COR_REGION, COR_AUTH_METHOD, COR_SORT_BY
+	viper.SetEnvPrefix("COR")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv() // read in environment variables that match
 
 	// If a config file is found, read it in.

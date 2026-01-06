@@ -48,8 +48,8 @@ type volumeResult struct {
 // volumesListCmd represents the volumes command
 var volumesCmd = &cobra.Command{
 	Use:   "volumes",
-	Short: "A brief description of your command",
-	Long:  ``,
+	Short: "List and optionally delete unattached EBS volumes",
+	Long:  `List EBS volumes in 'available' state (not attached to any instance) and optionally delete them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Create prompter using the prompter package
 		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
@@ -241,7 +241,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 }
 
 func init() {
-	volumesCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day.")
+	volumesCmd.Flags().String("filter-by-name", "*", "Filter volumes by tag:Name (wildcards supported, e.g. 'foo*').")
 }
 
 // DescribeVolumes describes the volumes based on the filter provided

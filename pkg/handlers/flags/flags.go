@@ -20,12 +20,16 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // FlagRetriever defines an interface for retrieving flags.
 type FlagRetriever interface {
 	GetString(name string) (string, error)
 	GetBool(name string) (bool, error)
+	// IsChanged returns true if a flag value was explicitly provided on the CLI.
+	// This is used to ensure correct precedence: CLI > config file > env > defaults.
+	IsChanged(name string) bool
 }
 
 // CommandFlagRetriever is a wrapper around *cobra.Command to implement FlagRetriever.
@@ -41,12 +45,31 @@ type Flag struct {
 
 // GetString retrieves a string flag from the cobra command.
 func (r *CommandFlagRetriever) GetString(name string) (string, error) {
-	return r.Cmd.Flags().GetString(name)
+	// Prefer local flags, then inherited (persistent from parents), then persistent on this cmd.
+	if r.Cmd.Flags().Lookup(name) != nil {
+		return r.Cmd.Flags().GetString(name)
+	}
+	if r.Cmd.InheritedFlags().Lookup(name) != nil {
+		return r.Cmd.InheritedFlags().GetString(name)
+	}
+	return r.Cmd.PersistentFlags().GetString(name)
 }
 
 // GetBool retrieves a boolean flag from the cobra command.
 func (r *CommandFlagRetriever) GetBool(name string) (bool, error) {
-	return r.Cmd.Flags().GetBool(name)
+	if r.Cmd.Flags().Lookup(name) != nil {
+		return r.Cmd.Flags().GetBool(name)
+	}
+	if r.Cmd.InheritedFlags().Lookup(name) != nil {
+		return r.Cmd.InheritedFlags().GetBool(name)
+	}
+	return r.Cmd.PersistentFlags().GetBool(name)
+}
+
+func (r *CommandFlagRetriever) IsChanged(name string) bool {
+	// pflag.FlagSet.Changed(name) returns false if the flag is not defined in that set,
+	// so we can safely check all relevant sets.
+	return r.Cmd.Flags().Changed(name) || r.Cmd.InheritedFlags().Changed(name) || r.Cmd.PersistentFlags().Changed(name)
 }
 
 func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]any, error) {
@@ -66,8 +89,17 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]
 		var err error
 		switch flag.Type {
 		case "string":
+			// Precedence: CLI > config/env (viper) > defaults
+			if !flagRetriever.IsChanged(flag.Name) && viper.IsSet(flag.Name) {
+				results[flag.Name] = viper.GetString(flag.Name)
+				break
+			}
 			results[flag.Name], err = flagRetriever.GetString(flag.Name)
 		case "bool":
+			if !flagRetriever.IsChanged(flag.Name) && viper.IsSet(flag.Name) {
+				results[flag.Name] = viper.GetBool(flag.Name)
+				break
+			}
 			results[flag.Name], err = flagRetriever.GetBool(flag.Name)
 		default:
 			err = fmt.Errorf("unsupported flag type: %s", flag.Type)

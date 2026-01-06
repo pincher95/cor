@@ -42,8 +42,8 @@ import (
 // imagesCmd represents the images command
 var imagesCmd = &cobra.Command{
 	Use:   "images",
-	Short: "A brief description of your command",
-	Long:  ``,
+	Short: "List and optionally delete orphan AMIs (and their snapshots)",
+	Long:  `List Amazon Machine Images (AMIs) owned by this account and identify those not used by instances or launch templates.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Create prompter using the prompter package
 		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
