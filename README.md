@@ -99,3 +99,7 @@ This binary can expose `pprof` endpoints **only when enabled**:
 
 - `COR_PPROF=1` enables the server
 - `COR_PPROF_ADDR=:6060` sets the bind address (default `:6060`)
+
+### License
+
+Apache-2.0 — see `LICENSE` and `NOTICE`.
