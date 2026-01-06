@@ -199,7 +199,6 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	go func() {
 		stream := printer.NewStreamTable(v.Output, true, []string{"Name", "Volume ID", "Snapshot ID", "Size"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
 
 		for res := range resultsChan {
 			stream.WriteRow(res.row...)
@@ -223,6 +222,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 			}
 		}
 		stream.WriteRow("Total", "", "", totalSize)
+		stream.Close()
 		close(resultCollectorDone)
 	}()
 

@@ -162,7 +162,10 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 	go func() {
 		stream := printer.NewStreamTable(e.Output, true, []string{"LoadBalancer Name", "LoadBalancer ARN", "targetGroups without targets"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
+		finish := func(err error) {
+			stream.Close()
+			printDone <- err
+		}
 
 		for row := range resultsChan {
 			stream.WriteRow(row...)
@@ -183,13 +186,13 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 
 				// Delete listeners
 				if err := e.deleteListeners(ctx, aws.String(lbArn)); err != nil {
-					printDone <- err
+					finish(err)
 					return
 				}
 
 				// Delete target groups by name
 				if err := e.deleteTargetGroups(ctx, strings.Split(tgNames, "\n")); err != nil {
-					printDone <- err
+					finish(err)
 					return
 				}
 
@@ -197,12 +200,12 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 				if _, err := e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
 					LoadBalancerArn: aws.String(lbArn),
 				}); err != nil {
-					printDone <- err
+					finish(err)
 					return
 				}
 			}
 		}
-		printDone <- nil
+		finish(nil)
 	}()
 
 	// Wait for the describer and workers to finish.

@@ -186,7 +186,10 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 	go func() {
 		stream := printer.NewStreamTable(c.Output, true, []string{"Name", "ID", "State", "VPC", "Subnet", "Created"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
+		finish := func(err error) {
+			stream.Close()
+			printDone <- err
+		}
 
 		for info := range infoChan {
 			stream.WriteRow(info.Name, info.ID, info.State, info.VpcID, info.Subnet, info.Created)
@@ -194,12 +197,12 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 			if doDelete {
 				c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": info.ID, "Name": info.Name})
 				if _, err := c.AWSClient.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(info.ID)}); err != nil {
-					printDone <- err
+					finish(err)
 					return
 				}
 			}
 		}
-		printDone <- nil
+		finish(nil)
 	}()
 
 	if err := g.Wait(); err != nil {

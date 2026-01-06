@@ -189,7 +189,10 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 	go func() {
 		stream := printer.NewStreamTable(t.Output, true, []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
+		finish := func(err error) {
+			stream.Close()
+			printDone <- err
+		}
 
 		for row := range resultsChan {
 			stream.WriteRow(row...)
@@ -212,12 +215,12 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 				if _, err := t.AWSClient.ELB.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{
 					TargetGroupArn: aws.String(arn),
 				}); err != nil {
-					printDone <- err
+					finish(err)
 					return
 				}
 			}
 		}
-		printDone <- nil
+		finish(nil)
 	}()
 
 	if err := g.Wait(); err != nil {

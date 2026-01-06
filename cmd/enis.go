@@ -191,7 +191,10 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 	go func() {
 		stream := printer.NewStreamTable(e.Output, true, []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC ID", "Subnet ID", "Private IP"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
+		finish := func(err error) {
+			stream.Close()
+			printDone <- err
+		}
 
 		for row := range resultsChan {
 			stream.WriteRow(row...)
@@ -215,12 +218,12 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 				if _, err := e.AWSClient.EC2.DeleteNetworkInterface(ctx, &ec2.DeleteNetworkInterfaceInput{
 					NetworkInterfaceId: aws.String(eniID),
 				}); err != nil {
-					printDone <- err
+					finish(err)
 					return
 				}
 			}
 		}
-		printDone <- nil
+		finish(nil)
 	}()
 
 	if err := g.Wait(); err != nil {

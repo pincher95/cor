@@ -217,7 +217,6 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	go func() {
 		stream := printer.NewStreamTable(a.Output, true, []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
 
 		for row := range resultsChan {
 			stream.WriteRow(row...)
@@ -249,6 +248,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 				}
 			}
 		}
+		stream.Close()
 		close(resultDone)
 	}()
 
