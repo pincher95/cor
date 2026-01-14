@@ -111,6 +111,9 @@ func runElasticIPsCmd(ctx context.Context, prompter *prompter.Client, output io.
 }
 
 func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[string]any) error {
+	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
+	rootCtx := ctx
+
 	// If deleting, confirm up-front so we can stream without buffering IDs.
 	doDelete := false
 	if (*flagValues)["delete"].(bool) {
@@ -131,7 +134,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	resultsChan := make(chan table.Row, 10)
 
 	// Create an errgroup with context
-	g, ctx := errgroup.WithContext(ctx)
+	g, egCtx := errgroup.WithContext(ctx)
 
 	// Goroutine to describe volumes
 	g.Go(func() error {
@@ -146,7 +149,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 				}(),
 			},
 		}
-		if err := a.describeAddresses(ctx, addressChan, &elasticIPFilter); err != nil {
+		if err := a.describeAddresses(egCtx, addressChan, &elasticIPFilter); err != nil {
 			return err
 		}
 		return nil
@@ -158,7 +161,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
+				case <-egCtx.Done():
 					return nil
 				case addressWithTags, ok := <-addressChan:
 					if !ok {
@@ -236,7 +239,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 				}
 
 				a.Logger.LogInfo("Releasing Elastic IP", map[string]any{"AllocationId": allocationID, "PublicIp": publicIP})
-				if _, err := a.AWSClient.EC2.ReleaseAddress(ctx, input); err != nil {
+				if _, err := a.AWSClient.EC2.ReleaseAddress(rootCtx, input); err != nil {
 					a.Logger.LogError("Error releasing Elastic IP", err, map[string]any{"AllocationId": allocationID, "PublicIp": publicIP}, false)
 					// fail-fast
 					break

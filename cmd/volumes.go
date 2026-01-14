@@ -108,6 +108,9 @@ func runVolumeCmd(ctx context.Context, prompter *prompter.Client, output io.Writ
 }
 
 func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
+	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
+	rootCtx := ctx
+
 	// If deleting, confirm up-front so we can stream without buffering IDs.
 	doDelete := false
 	if (*flagValues)["delete"].(bool) {
@@ -128,7 +131,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	resultsChan := make(chan volumeResult, 10)
 
 	// Create an errgroup with context
-	g, ctx := errgroup.WithContext(ctx)
+	g, egCtx := errgroup.WithContext(ctx)
 
 	// Goroutine to describe volumes
 	g.Go(func() error {
@@ -147,7 +150,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 				}(),
 			},
 		}
-		if err := v.DescribeVolumes(ctx, volumeWithTagsChan, &volumeFilter); err != nil {
+		if err := v.DescribeVolumes(egCtx, volumeWithTagsChan, &volumeFilter); err != nil {
 			return err
 		}
 		return nil
@@ -159,8 +162,8 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case volume, ok := <-volumeWithTagsChan:
 					if !ok {
 						return nil
@@ -214,7 +217,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 					continue
 				}
 				v.Logger.LogInfo("Deleting Volumes", map[string]any{"VolumeId": volID})
-				if _, err := v.AWSClient.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volID)}); err != nil {
+				if _, err := v.AWSClient.DeleteVolume(rootCtx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volID)}); err != nil {
 					v.Logger.LogError("Error deleting volume", err, map[string]any{"VolumeId": volID}, false)
 					// Cancel the group by returning; main goroutine will see ctx.Done via errgroup.
 					break

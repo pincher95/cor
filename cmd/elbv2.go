@@ -105,6 +105,9 @@ func runElbv2Cmd(ctx context.Context, prompter prompter.Client, output io.Writer
 }
 
 func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]any) error {
+	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
+	rootCtx := ctx
+
 	// If deleting, confirm up-front so we can stream without buffering IDs.
 	doDelete := false
 	if (*flagValues)["delete"].(bool) {
@@ -125,11 +128,11 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 	resultsChan := make(chan table.Row, 50)
 
 	// Create an errgroup with context
-	g, ctx := errgroup.WithContext(ctx)
+	g, egCtx := errgroup.WithContext(ctx)
 
 	// Goroutine to describe load balancers
 	g.Go(func() error {
-		if err := e.describeLoadBalancersV2(ctx, loadBalancerChan); err != nil {
+		if err := e.describeLoadBalancersV2(egCtx, loadBalancerChan); err != nil {
 			return err
 		}
 		return nil
@@ -139,13 +142,13 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case lb, ok := <-loadBalancerChan:
 					if !ok {
 						return nil
 					}
-					tableRow, err := e.handleLoadBalancerV2(ctx, lb, (*flagValues)["filter-by-name"].(string))
+					tableRow, err := e.handleLoadBalancerV2(egCtx, lb, (*flagValues)["filter-by-name"].(string))
 					if err != nil {
 						return err
 					}
@@ -185,19 +188,19 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": lbName})
 
 				// Delete listeners
-				if err := e.deleteListeners(ctx, aws.String(lbArn)); err != nil {
+				if err := e.deleteListeners(rootCtx, aws.String(lbArn)); err != nil {
 					finish(err)
 					return
 				}
 
 				// Delete target groups by name
-				if err := e.deleteTargetGroups(ctx, strings.Split(tgNames, "\n")); err != nil {
+				if err := e.deleteTargetGroups(rootCtx, strings.Split(tgNames, "\n")); err != nil {
 					finish(err)
 					return
 				}
 
 				// Delete load balancer
-				if _, err := e.AWSClient.DeleteLoadBalancer(ctx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
+				if _, err := e.AWSClient.DeleteLoadBalancer(rootCtx, &elasticloadbalancingv2.DeleteLoadBalancerInput{
 					LoadBalancerArn: aws.String(lbArn),
 				}); err != nil {
 					finish(err)
@@ -209,15 +212,17 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 	}()
 
 	// Wait for the describer and workers to finish.
-	if err := g.Wait(); err != nil {
-		e.Logger.LogError("Error during volume processing", err, nil, false)
-		return err
-	}
-
-	// All worker and describer goroutines are done; close the results channel.
+	err := g.Wait()
+	// Close results channel in all cases so the printer goroutine can exit.
 	close(resultsChan)
-	if err := <-printDone; err != nil {
-		e.Logger.LogError("Error streaming/deleting elbv2", err, nil, false)
+	if perr := <-printDone; perr != nil {
+		e.Logger.LogError("Error streaming/deleting elbv2", perr, nil, false)
+		if err == nil {
+			err = perr
+		}
+	}
+	if err != nil {
+		e.Logger.LogError("Error during volume processing", err, nil, false)
 		return err
 	}
 

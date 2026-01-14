@@ -93,6 +93,9 @@ func runTargetGroupsCmd(ctx context.Context, prompter prompter.Client, output io
 }
 
 func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[string]any) error {
+	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
+	rootCtx := ctx
+
 	// If deleting, confirm up-front so we can stream without buffering IDs.
 	doDelete := false
 	if (*flagValues)["delete"].(bool) {
@@ -111,12 +114,12 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 	tgChan := make(chan elbtypes.TargetGroup, 50)
 	resultsChan := make(chan table.Row, 50)
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, egCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		p := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(t.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{})
 		for p.HasMorePages() {
-			page, err := p.NextPage(ctx)
+			page, err := p.NextPage(egCtx)
 			if err != nil {
 				close(tgChan)
 				return err
@@ -136,8 +139,8 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case tg, ok := <-tgChan:
 					if !ok {
 						return nil
@@ -212,7 +215,7 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 					continue
 				}
 				t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": arn})
-				if _, err := t.AWSClient.ELB.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{
+				if _, err := t.AWSClient.ELB.DeleteTargetGroup(rootCtx, &elasticloadbalancingv2.DeleteTargetGroupInput{
 					TargetGroupArn: aws.String(arn),
 				}); err != nil {
 					finish(err)

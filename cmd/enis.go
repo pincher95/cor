@@ -85,6 +85,9 @@ func runENIsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer
 }
 
 func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any) error {
+	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
+	rootCtx := ctx
+
 	// If deleting, confirm up-front so we can stream without buffering IDs.
 	doDelete := false
 	if (*flagValues)["delete"].(bool) {
@@ -103,7 +106,7 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 	eniChan := make(chan types.NetworkInterface, 50)
 	resultsChan := make(chan table.Row, 50)
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, egCtx := errgroup.WithContext(ctx)
 
 	// Describe ENIs (only unattached)
 	g.Go(func() error {
@@ -119,7 +122,7 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 			Filters: filters,
 		})
 		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(ctx)
+			page, err := paginator.NextPage(egCtx)
 			if err != nil {
 				close(eniChan)
 				return err
@@ -136,8 +139,8 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case ni, ok := <-eniChan:
 					if !ok {
 						return nil
@@ -215,7 +218,7 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 				}
 
 				e.Logger.LogInfo("Deleting ENI", map[string]any{"NetworkInterfaceId": eniID})
-				if _, err := e.AWSClient.EC2.DeleteNetworkInterface(ctx, &ec2.DeleteNetworkInterfaceInput{
+				if _, err := e.AWSClient.EC2.DeleteNetworkInterface(rootCtx, &ec2.DeleteNetworkInterfaceInput{
 					NetworkInterfaceId: aws.String(eniID),
 				}); err != nil {
 					finish(err)

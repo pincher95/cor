@@ -97,6 +97,9 @@ type natGatewayInfo struct {
 }
 
 func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[string]any) error {
+	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
+	rootCtx := ctx
+
 	// If deleting, confirm up-front so we can stream without buffering IDs.
 	doDelete := false
 	if (*flagValues)["delete"].(bool) {
@@ -114,7 +117,7 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 	natChan := make(chan types.NatGateway, 50)
 	infoChan := make(chan natGatewayInfo, 50)
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, egCtx := errgroup.WithContext(ctx)
 
 	// Producer
 	g.Go(func() error {
@@ -133,14 +136,14 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 		})
 
 		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(ctx)
+			page, err := paginator.NextPage(egCtx)
 			if err != nil {
 				return err
 			}
 			for _, ng := range page.NatGateways {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case natChan <- ng:
 				}
 			}
@@ -153,8 +156,8 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 		g.Go(func() error {
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case ng, ok := <-natChan:
 					if !ok {
 						return nil
@@ -196,7 +199,7 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 
 			if doDelete {
 				c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": info.ID, "Name": info.Name})
-				if _, err := c.AWSClient.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(info.ID)}); err != nil {
+				if _, err := c.AWSClient.DeleteNatGateway(rootCtx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(info.ID)}); err != nil {
 					finish(err)
 					return
 				}
