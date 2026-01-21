@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -96,20 +96,7 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
 	rootCtx := ctx
 
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := t.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			t.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-		if confirm == nil || !*confirm {
-			t.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
 
 	tgChan := make(chan elbtypes.TargetGroup, 50)
 	resultsChan := make(chan table.Row, 50)
@@ -132,7 +119,7 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 		return nil
 	})
 
-	filterByName := (*flagValues)["filter-by-name"].(string)
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 	includeAttached := (*flagValues)["include-attached"].(bool)
 
 	for range NumGoroutines {
@@ -188,19 +175,20 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 	}
 
 	// Stream output + optional delete
-	printDone := make(chan error, 1)
+	printDone := make(chan []string, 1)
 	go func() {
 		stream := printer.NewStreamTable(t.Output, true, []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		finish := func(err error) {
+		deleteArns := make([]string, 0)
+		finish := func() {
 			stream.Close()
-			printDone <- err
+			printDone <- deleteArns
 		}
 
 		for row := range resultsChan {
 			stream.WriteRow(row...)
 
-			if doDelete {
+			if collectDeletes {
 				// Name, Arn, Type, Protocol, Port, VpcId, AttachedCount
 				if len(row) < 7 {
 					continue
@@ -208,22 +196,15 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 				arn, _ := row[1].(string)
 				attachedCount, _ := row[6].(int)
 				if attachedCount > 0 {
-					t.Logger.LogInfo("Skipping attached target group", map[string]any{"TargetGroupArn": arn, "AttachedLoadBalancers": attachedCount})
 					continue
 				}
 				if arn == "" || arn == "-" {
 					continue
 				}
-				t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": arn})
-				if _, err := t.AWSClient.ELB.DeleteTargetGroup(rootCtx, &elasticloadbalancingv2.DeleteTargetGroupInput{
-					TargetGroupArn: aws.String(arn),
-				}); err != nil {
-					finish(err)
-					return
-				}
+				deleteArns = append(deleteArns, arn)
 			}
 		}
-		finish(nil)
+		finish()
 	}()
 
 	if err := g.Wait(); err != nil {
@@ -231,9 +212,27 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 		return err
 	}
 	close(resultsChan)
-	if err := <-printDone; err != nil {
-		t.Logger.LogError("Error streaming/deleting target groups", err, nil, false)
-		return err
+	deleteArns := <-printDone
+	if collectDeletes {
+		if len(deleteArns) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(t.Prompter, t.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, arn := range deleteArns {
+			t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": arn})
+			if _, err := t.AWSClient.ELB.DeleteTargetGroup(rootCtx, &elasticloadbalancingv2.DeleteTargetGroupInput{
+				TargetGroupArn: aws.String(arn),
+			}); err != nil {
+				t.Logger.LogError("Error deleting target group", err, map[string]any{"TargetGroupArn": arn}, false)
+				return err
+			}
+		}
 	}
 
 	return nil

@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -120,20 +120,12 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 	// preserve the original context for delete operations (avoid errgroup ctx cancellation)
 	rootCtx := ctx
 
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := i.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			i.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-		if confirm == nil || !*confirm {
-			i.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
+	collectDeletes := (*flagValues)["delete"].(bool)
+	type imageDeleteCandidate struct {
+		imageID     string
+		snapshotIDs []string
 	}
+	deleteCandidates := make([]imageDeleteCandidate, 0)
 
 	includeUsedByInstance := (*flagValues)["include-used-by-instance"].(bool)
 	includeUsedByLaunchTemplate := (*flagValues)["include-used-by-launch-template"].(bool)
@@ -351,17 +343,13 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 	// -------------------------------------------------------------------------
 	// Describe images and stream results
 	// -------------------------------------------------------------------------
-	filterByName := (*flagValues)["filter-by-name"].(string)
-	imageFilters := []ec2types.Filter{
-		{
-			Name: aws.String("name"),
-			Values: func() []string {
-				if filterByName != "" {
-					return []string{filterByName}
-				}
-				return []string{}
-			}(),
-		},
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	imageFilters := []ec2types.Filter{}
+	if filterByName != "" {
+		imageFilters = append(imageFilters, ec2types.Filter{
+			Name:   aws.String("name"),
+			Values: []string{filterByName},
+		})
 	}
 
 	imgPaginator := ec2.NewDescribeImagesPaginator(i.AWSClient.EC2, &ec2.DescribeImagesInput{
@@ -428,23 +416,40 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 
 			stream.WriteRow(base...)
 
-			if doDelete {
-				i.Logger.LogInfo("Deleting AMI", map[string]any{"amiID": imageID})
-				if _, err := i.AWSClient.EC2.DeregisterImage(rootCtx, &ec2.DeregisterImageInput{ImageId: aws.String(imageID)}); err != nil {
-					return err
-				}
+			if collectDeletes {
+				deleteCandidates = append(deleteCandidates, imageDeleteCandidate{
+					imageID:     imageID,
+					snapshotIDs: snapshotIds,
+				})
+			}
+		}
+	}
 
-				if err := i.waitForImageDeregistration(rootCtx, imageID); err != nil {
-					return err
+	if collectDeletes {
+		if len(deleteCandidates) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(i.Prompter, i.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, candidate := range deleteCandidates {
+			i.Logger.LogInfo("Deleting AMI", map[string]any{"amiID": candidate.imageID})
+			if _, err := i.AWSClient.EC2.DeregisterImage(rootCtx, &ec2.DeregisterImageInput{ImageId: aws.String(candidate.imageID)}); err != nil {
+				return err
+			}
+			if err := i.waitForImageDeregistration(rootCtx, candidate.imageID); err != nil {
+				return err
+			}
+			for _, snapshot := range candidate.snapshotIDs {
+				if snapshot == "" {
+					continue
 				}
-
-				for _, snapshot := range snapshotIds {
-					if snapshot == "" {
-						continue
-					}
-					if _, err := i.AWSClient.EC2.DeleteSnapshot(rootCtx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshot)}); err != nil {
-						return err
-					}
+				if _, err := i.AWSClient.EC2.DeleteSnapshot(rootCtx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshot)}); err != nil {
+					return err
 				}
 			}
 		}
@@ -461,7 +466,7 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// imagesCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-	imagesCmd.Flags().String("filter-by-name", "*", "The name of the AMI (provided during image creation) ,wildcard ( * ) can be used.")
+	imagesCmd.Flags().String("filter-by-name", "", "Filter AMIs by name (empty = no filter).")
 	imagesCmd.Flags().Bool("include-used-by-instance", false, "Include images that are used by instances.")
 	imagesCmd.Flags().Bool("include-used-by-launch-template", false, "Include images that are used by launch templates.")
 }

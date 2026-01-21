@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -100,19 +100,7 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
 	rootCtx := ctx
 
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := c.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			return err
-		}
-		if confirm == nil || !*confirm {
-			c.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
 
 	natChan := make(chan types.NatGateway, 50)
 	infoChan := make(chan natGatewayInfo, 50)
@@ -185,27 +173,24 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 	}
 
 	// Printer (stream)
-	printDone := make(chan error, 1)
+	printDone := make(chan []natGatewayInfo, 1)
 	go func() {
 		stream := printer.NewStreamTable(c.Output, true, []string{"Name", "ID", "State", "VPC", "Subnet", "Created"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		finish := func(err error) {
+		deleteCandidates := make([]natGatewayInfo, 0)
+		finish := func() {
 			stream.Close()
-			printDone <- err
+			printDone <- deleteCandidates
 		}
 
 		for info := range infoChan {
 			stream.WriteRow(info.Name, info.ID, info.State, info.VpcID, info.Subnet, info.Created)
 
-			if doDelete {
-				c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": info.ID, "Name": info.Name})
-				if _, err := c.AWSClient.DeleteNatGateway(rootCtx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(info.ID)}); err != nil {
-					finish(err)
-					return
-				}
+			if collectDeletes {
+				deleteCandidates = append(deleteCandidates, info)
 			}
 		}
-		finish(nil)
+		finish()
 	}()
 
 	if err := g.Wait(); err != nil {
@@ -215,9 +200,25 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 		return err
 	}
 	close(infoChan)
-	if err := <-printDone; err != nil {
-		c.Logger.LogError("Error streaming/deleting NAT Gateways", err, nil, false)
-		return err
+	deleteCandidates := <-printDone
+	if collectDeletes {
+		if len(deleteCandidates) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(c.Prompter, c.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, info := range deleteCandidates {
+			c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": info.ID, "Name": info.Name})
+			if _, err := c.AWSClient.DeleteNatGateway(rootCtx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(info.ID)}); err != nil {
+				c.Logger.LogError("Error deleting NAT Gateway", err, map[string]any{"ID": info.ID}, false)
+				return err
+			}
+		}
 	}
 
 	return nil

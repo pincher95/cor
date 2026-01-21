@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -107,19 +107,8 @@ type rdsResource struct {
 func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any) error {
 	rootCtx := ctx
 
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := c.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			return err
-		}
-		if confirm == nil || !*confirm {
-			c.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
+	deleteCandidates := make([]rdsResource, 0)
 
 	resChan := make(chan rdsResource, 50)
 	g, egCtx := errgroup.WithContext(ctx)
@@ -209,7 +198,28 @@ func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any)
 	for res := range resChan {
 		stream.WriteRow(res.Type, res.ID, res.Status, res.Created)
 
-		if doDelete {
+		if collectDeletes {
+			deleteCandidates = append(deleteCandidates, res)
+		}
+	}
+
+	if err := g.Wait(); err != nil {
+		c.Logger.LogError("Error processing RDS resources", err, nil, false)
+		return err
+	}
+
+	if collectDeletes {
+		if len(deleteCandidates) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(c.Prompter, c.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, res := range deleteCandidates {
 			if res.Type == "Instance" {
 				c.Logger.LogInfo("Deleting RDS Instance (SkipFinalSnapshot=true)", map[string]any{"ID": res.ID})
 				_, err := c.AWSClient.DeleteDBInstance(rootCtx, &rds.DeleteDBInstanceInput{
@@ -230,11 +240,6 @@ func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any)
 				return err
 			}
 		}
-	}
-
-	if err := g.Wait(); err != nil {
-		c.Logger.LogError("Error processing RDS resources", err, nil, false)
-		return err
 	}
 
 	return nil

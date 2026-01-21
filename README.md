@@ -18,6 +18,13 @@ COR currently supports:
 - **NAT gateways**: list and optionally delete (`natgateways`)
 - **RDS**: stopped instances + manual snapshots (`rds`)
 - **CloudWatch Logs**: log groups (optionally delete) (`logs`)
+- **EFS**: file systems with zero mount targets (`efs`)
+- **ECR**: untagged/old container images (`ecr`)
+- **Route53**: hosted zones with only NS/SOA records (`route53zones`)
+- **VPC Endpoints**: interface endpoints with no ENIs (`vpcendpoints`)
+- **Client VPN**: endpoints with zero active connections (`clientvpn`)
+- **Site-to-Site VPN**: connections with no tunnels up (`vpnconnections`)
+- **Transit Gateway**: VPC attachments without route table association (`tgwattachments`)
 
 ### Install
 

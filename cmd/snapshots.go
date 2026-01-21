@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -101,20 +101,12 @@ func runSnapshotCmd(ctx context.Context, prompter prompter.Client, output io.Wri
 }
 
 func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]any) error {
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := s.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			s.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-		if confirm == nil || !*confirm {
-			s.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
+	collectDeletes := (*flagValues)["delete"].(bool)
+	type snapshotDeleteCandidate struct {
+		id   string
+		name string
 	}
+	deleteCandidates := make([]snapshotDeleteCandidate, 0)
 
 	// Precompute usage sets (needed to accurately filter orphan snapshots).
 	usedByImages, err := s.collectSnapshotsUsedByImages(ctx)
@@ -142,8 +134,11 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string
 	defer stream.Close()
 
 	var totalSize int32
-	filterByName := (*flagValues)["filter-by-name"].(string)
-	snapFilters := []types.Filter{{Name: aws.String("tag:Name"), Values: []string{filterByName}}}
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	snapFilters := []types.Filter{}
+	if filterByName != "" {
+		snapFilters = append(snapFilters, types.Filter{Name: aws.String("tag:Name"), Values: []string{filterByName}})
+	}
 	snapPaginator := ec2.NewDescribeSnapshotsPaginator(s.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
 		OwnerIds: []string{"self"},
 		Filters:  snapFilters,
@@ -176,18 +171,34 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string
 			stream.WriteRow(name, snapshotID, *snap.VolumeSize)
 			totalSize += *snap.VolumeSize
 
-			if doDelete {
-				s.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": snapshotID, "Name": name})
-				if _, err := s.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshotID)}); err != nil {
-					s.Logger.LogError("Error deleting snapshot", err, map[string]any{"SnapshotID": snapshotID}, false)
-					return err
-				}
+			if collectDeletes {
+				deleteCandidates = append(deleteCandidates, snapshotDeleteCandidate{id: snapshotID, name: name})
 			}
 		}
 	}
 
 	// Total
 	stream.WriteRow("Total", "", totalSize)
+
+	if collectDeletes {
+		if len(deleteCandidates) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(s.Prompter, s.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, candidate := range deleteCandidates {
+			s.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": candidate.id, "Name": candidate.name})
+			if _, err := s.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(candidate.id)}); err != nil {
+				s.Logger.LogError("Error deleting snapshot", err, map[string]any{"SnapshotID": candidate.id}, false)
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -203,7 +214,7 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// snapshotsCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-	snapshotsCmd.Flags().String("filter-by-name", "*", "The name of the volume (provided during volume creation) ,You can use a wildcard ( * ).")
+	snapshotsCmd.Flags().String("filter-by-name", "", "Filter snapshots by tag:Name (empty = no filter).")
 }
 
 func (s *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[string]bool, error) {

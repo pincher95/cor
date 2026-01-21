@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -95,7 +95,7 @@ var elasticIPsCmd = &cobra.Command{
 }
 
 func init() {
-	elasticIPsCmd.Flags().String("filter-by-name", "*", "Filter Elastic IPs by tag:Name (wildcards supported, e.g. 'foo*').")
+	elasticIPsCmd.Flags().String("filter-by-name", "", "Filter Elastic IPs by tag:Name (empty = no filter).")
 }
 
 func runElasticIPsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
@@ -114,20 +114,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
 	rootCtx := ctx
 
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := a.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			a.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-		if confirm == nil || !*confirm {
-			a.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
 
 	// Create a channel to process addresses
 	addressChan := make(chan addressWithTags, 10)
@@ -136,18 +123,15 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	// Create an errgroup with context
 	g, egCtx := errgroup.WithContext(ctx)
 
-	// Goroutine to describe volumes
+	// Goroutine to describe addresses
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 	g.Go(func() error {
-		elasticIPFilter := []types.Filter{
-			{
-				Name: aws.String("tag:Name"),
-				Values: func() []string {
-					if filterByName, ok := (*flagValues)["filter-by-name"].(string); ok {
-						return []string{filterByName}
-					}
-					return []string{}
-				}(),
-			},
+		elasticIPFilter := []types.Filter{}
+		if filterByName != "" {
+			elasticIPFilter = append(elasticIPFilter, types.Filter{
+				Name:   aws.String("tag:Name"),
+				Values: []string{filterByName},
+			})
 		}
 		if err := a.describeAddresses(egCtx, addressChan, &elasticIPFilter); err != nil {
 			return err
@@ -211,15 +195,16 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	}
 
 	// Printer goroutine: stream output as rows arrive.
-	resultDone := make(chan struct{})
+	resultDone := make(chan []ec2.ReleaseAddressInput, 1)
 	go func() {
 		stream := printer.NewStreamTable(a.Output, true, []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
 
+		deleteInputs := make([]ec2.ReleaseAddressInput, 0)
 		for row := range resultsChan {
 			stream.WriteRow(row...)
 
-			if doDelete {
+			if collectDeletes {
 				// Expect: Name, AllocationID, PublicIP, AssociationID, NetworkInterfaceID
 				if len(row) < 3 {
 					continue
@@ -229,7 +214,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 				publicIP, _ := row[2].(string)
 
 				// Prefer AllocationId (VPC EIPs), fall back to PublicIp (EC2-Classic).
-				input := &ec2.ReleaseAddressInput{}
+				input := ec2.ReleaseAddressInput{}
 				if allocationID != "" && allocationID != "-" {
 					input.AllocationId = aws.String(allocationID)
 				} else if publicIP != "" && publicIP != "-" {
@@ -237,28 +222,44 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 				} else {
 					continue
 				}
-
-				a.Logger.LogInfo("Releasing Elastic IP", map[string]any{"AllocationId": allocationID, "PublicIp": publicIP})
-				if _, err := a.AWSClient.EC2.ReleaseAddress(rootCtx, input); err != nil {
-					a.Logger.LogError("Error releasing Elastic IP", err, map[string]any{"AllocationId": allocationID, "PublicIp": publicIP}, false)
-					// fail-fast
-					break
-				}
+				deleteInputs = append(deleteInputs, input)
 			}
 		}
 		stream.Close()
-		close(resultDone)
+		resultDone <- deleteInputs
 	}()
 
 	// Wait for the describer and workers to finish.
-	if err := g.Wait(); err != nil {
-		a.Logger.LogError("Error during volume processing", err, nil, false)
-		return err
-	}
+	err := g.Wait()
 
 	// All worker and describer goroutines are done; close the results channel.
 	close(resultsChan)
-	<-resultDone
+	deleteInputs := <-resultDone
+	if err != nil {
+		a.Logger.LogError("Error during elastic IP processing", err, nil, false)
+		return err
+	}
+	if collectDeletes {
+		if len(deleteInputs) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(a.Prompter, a.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, input := range deleteInputs {
+			allocationID := aws.ToString(input.AllocationId)
+			publicIP := aws.ToString(input.PublicIp)
+			a.Logger.LogInfo("Releasing Elastic IP", map[string]any{"AllocationId": allocationID, "PublicIp": publicIP})
+			if _, err := a.AWSClient.EC2.ReleaseAddress(rootCtx, &input); err != nil {
+				a.Logger.LogError("Error releasing Elastic IP", err, map[string]any{"AllocationId": allocationID, "PublicIp": publicIP}, false)
+				return err
+			}
+		}
+	}
 
 	return nil
 }

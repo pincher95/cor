@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,6 +49,12 @@ var rootCmd = &cobra.Command{
 	Short: "Delete orphaned AWS resources",
 	Long: `
 	A command line tool to delete orphaned AWS resources.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		return applyTimeout(cmd)
+	},
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		cancelTimeout(cmd)
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -77,6 +83,13 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(natgatewaysCmd)
 	rootCmd.AddCommand(rdsCmd)
 	rootCmd.AddCommand(logsCmd)
+	rootCmd.AddCommand(efsCmd)
+	rootCmd.AddCommand(ecrCmd)
+	rootCmd.AddCommand(route53ZonesCmd)
+	rootCmd.AddCommand(vpcEndpointsCmd)
+	rootCmd.AddCommand(clientVPNCmd)
+	rootCmd.AddCommand(vpnConnectionsCmd)
+	rootCmd.AddCommand(tgwAttachmentsCmd)
 }
 
 func init() {
@@ -90,8 +103,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.cor.yaml)")
 	rootCmd.PersistentFlags().StringP("region", "r", "us-east-1", "AWS region")
 	rootCmd.PersistentFlags().StringP("profile", "p", "default", "AWS credentials file profile")
-	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication methos AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
-	rootCmd.PersistentFlags().Bool("delete", false, "Delete Orphant resources")
+	rootCmd.PersistentFlags().StringP("auth-method", "a", "AWS_CREDENTIALS_FILE", "AWS authentication method AWS_CREDENTIALS_FILE/IAM_ARN/ENV_SECRET")
+	rootCmd.PersistentFlags().Bool("delete", false, "Delete orphaned resources")
 	rootCmd.PersistentFlags().String("sort-by", "", "Sort output by column name (buffers results in memory; disables streaming)")
 	rootCmd.PersistentFlags().Bool("sort-desc", false, "Sort output in descending order")
 	rootCmd.PersistentFlags().Duration("timeout", 0, "Timeout in seconds for the command execution.")
@@ -127,6 +140,37 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+type timeoutCancelKey struct{}
+
+func applyTimeout(cmd *cobra.Command) error {
+	timeout, err := getDurationFlag(cmd, "timeout")
+	if err != nil {
+		return err
+	}
+	if timeout <= 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+	cmd.SetContext(context.WithValue(ctx, timeoutCancelKey{}, cancel))
+	return nil
+}
+
+func cancelTimeout(cmd *cobra.Command) {
+	if cancel, ok := cmd.Context().Value(timeoutCancelKey{}).(context.CancelFunc); ok {
+		cancel()
+	}
+}
+
+func getDurationFlag(cmd *cobra.Command, name string) (time.Duration, error) {
+	if cmd.Flags().Lookup(name) != nil {
+		return cmd.Flags().GetDuration(name)
+	}
+	if cmd.InheritedFlags().Lookup(name) != nil {
+		return cmd.InheritedFlags().GetDuration(name)
+	}
+	return cmd.PersistentFlags().GetDuration(name)
 }
 
 // GetRootCommand returns the root command

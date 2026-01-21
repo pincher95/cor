@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,31 +43,9 @@ func main() {
 		}()
 	}
 
-	// logger := logging.NewLogger()
-	// rootCmd := cmd.GetRootCommand()
-
-	// Parse flags before setting up the context
-	// rootCmd.SetArgs(os.Args[1:])
-	// if err := rootCmd.ParseFlags(os.Args[1:]); err != nil {
-	// 	logger.LogError("Error parsing flags", err, nil, true)
-	// }
-
-	// Retrieve the timeout value
-	// timeout, err := rootCmd.PersistentFlags().GetDuration("timeout")
-	// if err != nil {
-	// 	logger.LogError("Error retrieving timeout flag", err, nil, true)
-	// }
-
 	// Set up signal handling context
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
-
-	// Apply timeout if specified
-	// if timeout > 0 {
-	// 	var cancel context.CancelFunc
-	// 	ctx, cancel = context.WithTimeout(ctx, timeout)
-	// 	defer cancel()
-	// }
 
 	// Execute the root command with the context
 	if err := cmd.Execute(ctx); err != nil {

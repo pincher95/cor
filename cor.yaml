@@ -18,7 +18,7 @@ sort-by: "" # e.g. "Name"
 sort-desc: false
 
 # ---- Command-specific options (optional) ----
-filter-by-name: "*" # used by several commands (volumes/images/snapshots/enis/elasticips/...)
+filter-by-name: "" # used by several commands (volumes/images/snapshots/enis/elasticips/...)
 
 # images:
 creation-date-before: "" # YYYY-MM-DD
@@ -38,3 +38,30 @@ force: false
 # rds:
 include-instances: true
 include-snapshots: true
+
+# efs:
+# include-attached: false
+
+# ecr:
+untagged-only: true
+older-than-days: ""
+
+# route53:
+include-non-empty: false
+
+# vpcendpoints:
+filter-by-service: ""
+# include-attached: false
+include-non-interface: false
+
+# clientvpn:
+include-active: false
+
+# vpnconnections:
+filter-by-id: ""
+include-up: false
+
+# tgwattachments:
+filter-by-resource: ""
+include-associated: false
+include-non-vpc: false

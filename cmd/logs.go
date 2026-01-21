@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -93,19 +93,8 @@ type logGroupRes struct {
 }
 
 func (c *AWSCommand) executeLogs(ctx context.Context, flagValues *map[string]any) error {
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := c.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			return err
-		}
-		if confirm == nil || !*confirm {
-			c.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
+	deleteNames := make([]string, 0)
 
 	resChan := make(chan logGroupRes, 100)
 	g, ctx := errgroup.WithContext(ctx)
@@ -159,20 +148,36 @@ func (c *AWSCommand) executeLogs(ctx context.Context, flagValues *map[string]any
 		}
 		stream.WriteRow(res.Name, sizeStr, res.Retention)
 
-		if doDelete {
-			c.Logger.LogInfo("Deleting Log Group", map[string]any{"Name": res.Name})
-			_, err := c.AWSClient.DeleteLogGroup(ctx, &cloudwatchlogs.DeleteLogGroupInput{
-				LogGroupName: aws.String(res.Name),
-			})
-			if err != nil {
-				return err
-			}
+		if collectDeletes {
+			deleteNames = append(deleteNames, res.Name)
 		}
 	}
 
 	if err := g.Wait(); err != nil {
 		c.Logger.LogError("Error processing Log Groups", err, nil, false)
 		return err
+	}
+
+	if collectDeletes {
+		if len(deleteNames) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(c.Prompter, c.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, name := range deleteNames {
+			c.Logger.LogInfo("Deleting Log Group", map[string]any{"Name": name})
+			_, err := c.AWSClient.DeleteLogGroup(ctx, &cloudwatchlogs.DeleteLogGroupInput{
+				LogGroupName: aws.String(name),
+			})
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil

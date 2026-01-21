@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -92,19 +92,8 @@ func (b *AWSCommand) executeAutoscaling(ctx context.Context, flagValues *map[str
 	filterByName := (*flagValues)["filter-by-name"].(string)
 	force := (*flagValues)["force"].(bool)
 
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := b.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			b.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-		if confirm == nil || !*confirm {
-			b.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
+	deleteNames := make([]string, 0)
 
 	paginator := autoscaling.NewDescribeAutoScalingGroupsPaginator(b.AWSClient.ASG, &autoscaling.DescribeAutoScalingGroupsInput{})
 
@@ -158,15 +147,31 @@ func (b *AWSCommand) executeAutoscaling(ctx context.Context, flagValues *map[str
 
 			stream.WriteRow(name, min, desired, max, instanceCount, lbCount, tgCount)
 
-			if doDelete {
-				b.Logger.LogInfo("Deleting AutoScalingGroup", map[string]any{"AutoScalingGroupName": name, "ForceDelete": force})
-				if _, err := b.AWSClient.ASG.DeleteAutoScalingGroup(ctx, &autoscaling.DeleteAutoScalingGroupInput{
-					AutoScalingGroupName: aws.String(name),
-					ForceDelete:          aws.Bool(force),
-				}); err != nil {
-					b.Logger.LogError("Error deleting autoscaling group", err, map[string]any{"AutoScalingGroupName": name}, false)
-					return err
-				}
+			if collectDeletes {
+				deleteNames = append(deleteNames, name)
+			}
+		}
+	}
+
+	if collectDeletes {
+		if len(deleteNames) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(b.Prompter, b.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, name := range deleteNames {
+			b.Logger.LogInfo("Deleting AutoScalingGroup", map[string]any{"AutoScalingGroupName": name, "ForceDelete": force})
+			if _, err := b.AWSClient.ASG.DeleteAutoScalingGroup(ctx, &autoscaling.DeleteAutoScalingGroupInput{
+				AutoScalingGroupName: aws.String(name),
+				ForceDelete:          aws.Bool(force),
+			}); err != nil {
+				b.Logger.LogError("Error deleting autoscaling group", err, map[string]any{"AutoScalingGroupName": name}, false)
+				return err
 			}
 		}
 	}

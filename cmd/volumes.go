@@ -1,5 +1,5 @@
 /*
-Copyright 2024 Elastic Scaler Contributors.
+Copyright 2024 Cloud Orphaned Resources Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -111,20 +111,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
 	rootCtx := ctx
 
-	// If deleting, confirm up-front so we can stream without buffering IDs.
-	doDelete := false
-	if (*flagValues)["delete"].(bool) {
-		confirm, err := v.Prompter.Confirm("Are you sure you want to proceed? (yes/no): ")
-		if err != nil {
-			v.Logger.LogError("Error during user prompt", err, nil, false)
-			return err
-		}
-		if confirm == nil || !*confirm {
-			v.Logger.LogInfo("Aborted.", nil)
-			return nil
-		}
-		doDelete = true
-	}
+	collectDeletes := (*flagValues)["delete"].(bool)
 
 	// Create a channel to process volumes
 	volumeWithTagsChan := make(chan volumeWithTags, 10)
@@ -134,21 +121,19 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	g, egCtx := errgroup.WithContext(ctx)
 
 	// Goroutine to describe volumes
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 	g.Go(func() error {
 		volumeFilter := []types.Filter{
 			{
 				Name:   aws.String("status"),
 				Values: []string{"available"},
 			},
-			{
-				Name: aws.String("tag:Name"),
-				Values: func() []string {
-					if filterByName, ok := (*flagValues)["filter-by-name"].(string); ok {
-						return []string{filterByName}
-					}
-					return []string{}
-				}(),
-			},
+		}
+		if filterByName != "" {
+			volumeFilter = append(volumeFilter, types.Filter{
+				Name:   aws.String("tag:Name"),
+				Values: []string{filterByName},
+			})
 		}
 		if err := v.DescribeVolumes(egCtx, volumeWithTagsChan, &volumeFilter); err != nil {
 			return err
@@ -197,17 +182,18 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 	}
 
 	// Result collector goroutine: concurrently reads from resultsChan.
-	resultCollectorDone := make(chan struct{})
+	resultCollectorDone := make(chan []string, 1)
 	var totalSize int32
 	go func() {
 		stream := printer.NewStreamTable(v.Output, true, []string{"Name", "Volume ID", "Snapshot ID", "Size"})
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
 
+		deleteIDs := make([]string, 0)
 		for res := range resultsChan {
 			stream.WriteRow(res.row...)
 			totalSize += res.size
 
-			if doDelete {
+			if collectDeletes {
 				// row = Name, VolumeId, SnapshotId, Size
 				if len(res.row) < 2 {
 					continue
@@ -216,35 +202,50 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 				if volID == "" {
 					continue
 				}
-				v.Logger.LogInfo("Deleting Volumes", map[string]any{"VolumeId": volID})
-				if _, err := v.AWSClient.DeleteVolume(rootCtx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volID)}); err != nil {
-					v.Logger.LogError("Error deleting volume", err, map[string]any{"VolumeId": volID}, false)
-					// Cancel the group by returning; main goroutine will see ctx.Done via errgroup.
-					break
-				}
+				deleteIDs = append(deleteIDs, volID)
 			}
 		}
 		stream.WriteRow("Total", "", "", totalSize)
 		stream.Close()
-		close(resultCollectorDone)
+		resultCollectorDone <- deleteIDs
 	}()
 
 	// Wait for the describer and workers to finish.
-	if err := g.Wait(); err != nil {
-		v.Logger.LogError("Error during volume processing", err, nil, false)
-		return err
-	}
+	err := g.Wait()
 
 	// All worker and describer goroutines are done; close the results channel.
 	close(resultsChan)
 	// Wait for the collector to finish.
-	<-resultCollectorDone
+	deleteIDs := <-resultCollectorDone
+	if err != nil {
+		v.Logger.LogError("Error during volume processing", err, nil, false)
+		return err
+	}
+	if collectDeletes {
+		if len(deleteIDs) == 0 {
+			return nil
+		}
+		confirm, err := confirmDelete(v.Prompter, v.Logger)
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			return nil
+		}
+		for _, volID := range deleteIDs {
+			v.Logger.LogInfo("Deleting Volume", map[string]any{"VolumeId": volID})
+			if _, err := v.AWSClient.DeleteVolume(rootCtx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volID)}); err != nil {
+				v.Logger.LogError("Error deleting volume", err, map[string]any{"VolumeId": volID}, false)
+				return err
+			}
+		}
+	}
 
 	return nil
 }
 
 func init() {
-	volumesCmd.Flags().String("filter-by-name", "*", "Filter volumes by tag:Name (wildcards supported, e.g. 'foo*').")
+	volumesCmd.Flags().String("filter-by-name", "", "Filter volumes by tag:Name (empty = no filter).")
 }
 
 // DescribeVolumes describes the volumes based on the filter provided
