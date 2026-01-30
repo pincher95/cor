@@ -19,6 +19,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -35,6 +36,24 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
+
+type deleteCandidate struct {
+	lbName  string
+	lbArn   string
+	tgNames []string
+}
+
+type lbResult struct {
+	row             table.Row
+	deleteCandidate *deleteCandidate
+}
+
+type lbEvaluation struct {
+	orphanTargetGroups    []string
+	unhealthyTargetGroups []string
+	hasExistingTargets    bool
+	hasUnhealthyTargets   bool
+}
 
 // elbv2Cmd represents the elbv2 command
 var elbv2Cmd = &cobra.Command{
@@ -56,6 +75,18 @@ var elbv2Cmd = &cobra.Command{
 			{
 				Name: "filter-by-name",
 				Type: "string",
+			},
+			{
+				Name: "filter-by-tags",
+				Type: "string",
+			},
+			{
+				Name: "show-unhealthy",
+				Type: "bool",
+			},
+			{
+				Name: "show-tags",
+				Type: "bool",
 			},
 		}
 		// Get the flags
@@ -90,6 +121,9 @@ var elbv2Cmd = &cobra.Command{
 
 func init() {
 	elbv2Cmd.Flags().String("filter-by-name", "", "Filter load balancers by name (substring match).")
+	elbv2Cmd.Flags().String("filter-by-tags", "", "Filter by tags (key=value or key; comma-separated).")
+	elbv2Cmd.Flags().Bool("show-unhealthy", false, "Include load balancers with unhealthy targets.")
+	elbv2Cmd.Flags().Bool("show-tags", false, "Include tags column in output.")
 }
 
 func runElbv2Cmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
@@ -109,15 +143,13 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 	rootCtx := ctx
 
 	collectDeletes := (*flagValues)["delete"].(bool)
-	type deleteCandidate struct {
-		lbName  string
-		lbArn   string
-		tgNames []string
-	}
+	showUnhealthy := (*flagValues)["show-unhealthy"].(bool)
+	showTags := (*flagValues)["show-tags"].(bool)
+	tagFilters := parseTagFilters((*flagValues)["filter-by-tags"].(string))
 
 	// Create channels to send load balancers
 	loadBalancerChan := make(chan types.LoadBalancer, 50)
-	resultsChan := make(chan table.Row, 50)
+	resultsChan := make(chan lbResult, 50)
 
 	// Create an errgroup with context
 	g, egCtx := errgroup.WithContext(ctx)
@@ -141,7 +173,7 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 					if !ok {
 						return nil
 					}
-					tableRow, err := e.handleLoadBalancerV2(egCtx, lb, filterByName)
+					tableRow, err := e.handleLoadBalancerV2(egCtx, lb, filterByName, showUnhealthy, showTags, tagFilters)
 					if err != nil {
 						return err
 					}
@@ -160,7 +192,14 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 	}
 	printDone := make(chan printResult, 1)
 	go func() {
-		stream := printer.NewStreamTable(e.Output, true, []string{"LoadBalancer Name", "LoadBalancer ARN", "targetGroups without targets"})
+		headers := []string{"LoadBalancer Name", "LoadBalancer ARN", "targetGroups without targets"}
+		if showUnhealthy {
+			headers = append(headers, "targetGroups with unhealthy targets")
+		}
+		if showTags {
+			headers = append(headers, "Tags")
+		}
+		stream := printer.NewStreamTable(e.Output, true, headers)
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
 		deleteCandidates := make([]deleteCandidate, 0)
 		finish := func(err error) {
@@ -168,25 +207,11 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 			printDone <- printResult{err: err, deletes: deleteCandidates}
 		}
 
-		for row := range resultsChan {
-			stream.WriteRow(row...)
+		for res := range resultsChan {
+			stream.WriteRow(res.row...)
 
-			if collectDeletes {
-				// row: Name, Arn, targetGroupNames (newline separated)
-				if len(row) < 3 {
-					continue
-				}
-				lbName, _ := row[0].(string)
-				lbArn, _ := row[1].(string)
-				tgNames, _ := row[2].(string)
-				if lbArn == "" {
-					continue
-				}
-				deleteCandidates = append(deleteCandidates, deleteCandidate{
-					lbName:  lbName,
-					lbArn:   lbArn,
-					tgNames: strings.Split(tgNames, "\n"),
-				})
+			if collectDeletes && res.deleteCandidate != nil {
+				deleteCandidates = append(deleteCandidates, *res.deleteCandidate)
 			}
 		}
 		finish(nil)
@@ -254,10 +279,23 @@ func (e *AWSCommand) describeLoadBalancersV2(ctx context.Context, loadBalancerCh
 	return nil
 }
 
-func (e *AWSCommand) handleLoadBalancerV2(ctx context.Context, elb types.LoadBalancer, filterByName string) (*table.Row, error) {
+func (e *AWSCommand) handleLoadBalancerV2(ctx context.Context, elb types.LoadBalancer, filterByName string, showUnhealthy bool, showTags bool, tagFilters []tagFilter) (*lbResult, error) {
 	// Early exit if the load balancer name doesn't match the filter
-	if filterByName != "" && !strings.Contains(*elb.LoadBalancerName, filterByName) {
+	if !matchesFilterValue(aws.ToString(elb.LoadBalancerName), filterByName) {
 		return nil, nil
+	}
+
+	needTags := showTags || len(tagFilters) > 0
+	tagsValue := "-"
+	if needTags {
+		tagsMap, formattedTags, err := e.describeElbv2Tags(ctx, aws.ToString(elb.LoadBalancerArn))
+		if err != nil {
+			return nil, err
+		}
+		if len(tagFilters) > 0 && !tagsMatchFilters(tagsMap, tagFilters) {
+			return nil, nil
+		}
+		tagsValue = formattedTags
 	}
 
 	// Get target groups for the load balancer
@@ -267,19 +305,59 @@ func (e *AWSCommand) handleLoadBalancerV2(ctx context.Context, elb types.LoadBal
 	}
 
 	// Process the load balancer and its target groups
-	row, err := e.processLoadBalancer(ctx, elb, targetGroups)
+	eval, err := e.processLoadBalancer(ctx, targetGroups)
 	if err != nil {
 		return nil, err
 	}
 
-	return row, nil
+	if eval == nil {
+		return nil, nil
+	}
+
+	isOrphan := !eval.hasExistingTargets && len(eval.orphanTargetGroups) > 0
+	shouldOutput := isOrphan || (showUnhealthy && eval.hasUnhealthyTargets)
+	if !shouldOutput {
+		return nil, nil
+	}
+
+	orphanTargets := strings.Join(eval.orphanTargetGroups, "\n")
+	unhealthyTargets := strings.Join(eval.unhealthyTargetGroups, "\n")
+
+	row := table.Row{
+		*elb.LoadBalancerName,
+		*elb.LoadBalancerArn,
+		orphanTargets,
+	}
+	if showUnhealthy {
+		row = append(row, unhealthyTargets)
+	}
+	if showTags {
+		row = append(row, tagsValue)
+	}
+
+	var candidate *deleteCandidate
+	if isOrphan {
+		candidate = &deleteCandidate{
+			lbName:  *elb.LoadBalancerName,
+			lbArn:   *elb.LoadBalancerArn,
+			tgNames: eval.orphanTargetGroups,
+		}
+	}
+
+	return &lbResult{row: row, deleteCandidate: candidate}, nil
 }
 
-func (e *AWSCommand) processLoadBalancer(ctx context.Context, elb types.LoadBalancer, targetGroups []types.TargetGroup) (*table.Row, error) {
+func (e *AWSCommand) processLoadBalancer(ctx context.Context, targetGroups []types.TargetGroup) (*lbEvaluation, error) {
+	if len(targetGroups) == 0 {
+		return nil, nil
+	}
+
 	// Define a structure for target group results
 	type tgResult struct {
-		tgName         string
-		hasValidTarget bool // true if at least one target in the group is healthy, from delegation, or attached to a valid EC2 instance
+		tgName             string
+		hasExistingTarget  bool
+		hasUnhealthyTarget bool
+		isOrphan           bool
 	}
 
 	// Create a buffered channel sized to the number of target groups so sends do not block.
@@ -297,26 +375,37 @@ func (e *AWSCommand) processLoadBalancer(ctx context.Context, elb types.LoadBala
 				return err
 			}
 
-			validFound := false
+			hasExistingTarget := false
+			hasUnhealthyTarget := false
+
+			if len(resp.TargetHealthDescriptions) == 0 {
+				resChan <- tgResult{tgName: *tg.TargetGroupName, isOrphan: true}
+				return nil
+			}
+
 			// For each target health description, check if it's healthy.
-			// If unhealthy, first check if the target IP is within the delegated range,
-			// and if not, then verify via EC2 if the target exists.
+			// If unhealthy, verify via EC2 if the target exists.
 			for _, desc := range resp.TargetHealthDescriptions {
 				if desc.TargetHealth.State == types.TargetHealthStateEnumHealthy {
-					validFound = true
-					break
+					hasExistingTarget = true
+					continue
 				}
+				hasUnhealthyTarget = true
 				exists, err := e.checkInstanceExists(ctx, *desc.Target.Id)
 				if err != nil {
 					continue
 				}
 				if exists {
-					validFound = true
-					break
+					hasExistingTarget = true
 				}
 			}
 
-			resChan <- tgResult{tgName: *tg.TargetGroupName, hasValidTarget: validFound}
+			resChan <- tgResult{
+				tgName:             *tg.TargetGroupName,
+				hasExistingTarget:  hasExistingTarget,
+				hasUnhealthyTarget: hasUnhealthyTarget,
+				isOrphan:           !hasExistingTarget,
+			}
 			return nil
 		})
 	}
@@ -327,33 +416,21 @@ func (e *AWSCommand) processLoadBalancer(ctx context.Context, elb types.LoadBala
 	}
 	close(resChan)
 
-	// Gather results from the channel.
-	var results []tgResult
+	eval := &lbEvaluation{}
 	for res := range resChan {
-		results = append(results, res)
-	}
-
-	// If any target group has a valid target, skip this load balancer.
-	for _, r := range results {
-		if r.hasValidTarget {
-			return nil, nil
+		if res.hasExistingTarget {
+			eval.hasExistingTargets = true
+		}
+		if res.hasUnhealthyTarget {
+			eval.hasUnhealthyTargets = true
+			eval.unhealthyTargetGroups = append(eval.unhealthyTargetGroups, res.tgName)
+		}
+		if res.isOrphan {
+			eval.orphanTargetGroups = append(eval.orphanTargetGroups, res.tgName)
 		}
 	}
 
-	// Otherwise, join the names of target groups that do not have valid targets.
-	var tgNames []string
-	for _, r := range results {
-		tgNames = append(tgNames, r.tgName)
-	}
-
-	if len(tgNames) > 0 {
-		return &table.Row{
-			*elb.LoadBalancerName,
-			*elb.LoadBalancerArn,
-			strings.Join(tgNames, "\n"),
-		}, nil
-	}
-	return nil, nil
+	return eval, nil
 }
 
 func (e *AWSCommand) getTargetGroups(ctx context.Context, loadBalancerArn *string) ([]types.TargetGroup, error) {
@@ -419,14 +496,90 @@ func (e *AWSCommand) deleteTargetGroups(ctx context.Context, targetGroupNames []
 
 // Legacy pretty-table printer removed in favor of streaming output for low memory usage.
 
-// checkInstanceExists verifies via the EC2 API whether an instance exists with the provided IP address.
+func (e *AWSCommand) describeElbv2Tags(ctx context.Context, loadBalancerArn string) (map[string]string, string, error) {
+	if loadBalancerArn == "" {
+		return map[string]string{}, "-", nil
+	}
+	resp, err := e.AWSClient.ELB.DescribeTags(ctx, &elasticloadbalancingv2.DescribeTagsInput{
+		ResourceArns: []string{loadBalancerArn},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	for _, desc := range resp.TagDescriptions {
+		if aws.ToString(desc.ResourceArn) == loadBalancerArn {
+			tagMap := elbv2TagsToMap(desc.Tags)
+			return tagMap, formatElbv2Tags(tagMap), nil
+		}
+	}
+	return map[string]string{}, "-", nil
+}
+
+func elbv2TagsToMap(tags []types.Tag) map[string]string {
+	if len(tags) == 0 {
+		return map[string]string{}
+	}
+	tagMap := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		key := aws.ToString(tag.Key)
+		if key == "" {
+			continue
+		}
+		tagMap[key] = aws.ToString(tag.Value)
+	}
+	return tagMap
+}
+
+func formatElbv2Tags(tags map[string]string) string {
+	if len(tags) == 0 {
+		return "-"
+	}
+	values := make([]string, 0, len(tags))
+	for key, value := range tags {
+		if key == "" {
+			continue
+		}
+		if value == "" {
+			values = append(values, key)
+		} else {
+			values = append(values, key+"="+value)
+		}
+	}
+	if len(values) == 0 {
+		return "-"
+	}
+	sort.Strings(values)
+	return strings.Join(values, "\n")
+}
+
+// checkInstanceExists verifies via the EC2 API whether an instance exists for a target ID or IP.
 // If no instance is found, the target is considered invalid.
-func (e *AWSCommand) checkInstanceExists(ctx context.Context, targetIP string) (bool, error) {
+func (e *AWSCommand) checkInstanceExists(ctx context.Context, targetID string) (bool, error) {
+	if strings.HasPrefix(targetID, "i-") {
+		result, err := e.AWSClient.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			Filters: []ec2types.Filter{
+				{
+					Name:   aws.String("instance-id"),
+					Values: []string{targetID},
+				},
+			},
+		})
+		if err != nil {
+			return false, err
+		}
+		for _, reservation := range result.Reservations {
+			if len(reservation.Instances) > 0 {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
 	input := &ec2.DescribeInstancesInput{
 		Filters: []ec2types.Filter{
 			{
 				Name:   aws.String("private-ip-address"),
-				Values: []string{targetIP},
+				Values: []string{targetID},
 			},
 		},
 	}
