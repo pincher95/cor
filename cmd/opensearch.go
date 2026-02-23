@@ -1,0 +1,368 @@
+/*
+Copyright 2024 Cloud Orphaned Resources Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/aws-sdk-go-v2/service/opensearch"
+	opensearchtypes "github.com/aws/aws-sdk-go-v2/service/opensearch/types"
+	"github.com/jedib0t/go-pretty/v6/table"
+	handlers "github.com/pincher95/cor/pkg/handlers/aws"
+	"github.com/pincher95/cor/pkg/handlers/flags"
+	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
+	"github.com/pincher95/cor/pkg/handlers/prompter"
+	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+)
+
+type orphanOpenSearchDomain struct {
+	DomainName        string
+	EngineVersion     string
+	InstanceType      string
+	InstanceCount     int
+	StorageSize       int32
+	Created           string
+	NoIndexing        bool
+	NoSearching       bool
+	DaysSinceActivity int64
+	Reason            string
+}
+
+// opensearchCmd represents the opensearch command
+var opensearchCmd = &cobra.Command{
+	Use:   "opensearch",
+	Short: "List orphaned OpenSearch domains",
+	Long: `Finds OpenSearch/Elasticsearch domains that are potentially orphaned based on:
+- No indexing operations in the last N days (default: 7)
+- Zero search requests in the last 24 hours
+- Combination of both indicating no active usage
+
+Orphaned OpenSearch domains can incur significant costs:
+- t3.small.search: ~$26/month
+- r6g.large.search: ~$101/month
+- Storage: $0.135/GB-month (EBS)
+- Data transfer costs`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
+		output := os.Stdout
+		ctx := cmd.Context()
+		logger := logging.NewLogger()
+
+		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
+		additionalFlags := []flags.Flag{
+			{Name: "days-no-indexing", Type: "int"},
+			{Name: "hours-no-searches", Type: "int"},
+		}
+
+		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
+		if err != nil {
+			logger.LogError("Error getting flags", err, nil, true)
+			return err
+		}
+
+		cloudConfig := &handlers.CloudConfig{
+			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
+			Profile:    aws.String((*flagValues)["profile"].(string)),
+			Region:     aws.String((*flagValues)["region"].(string)),
+		}
+		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
+		if err != nil {
+			logger.LogError("Failed loading AWS client config", err, nil, true)
+			return err
+		}
+
+		opensearchClient := opensearch.NewFromConfig(*cfg)
+		cwClient := cloudwatch.NewFromConfig(*cfg)
+
+		awsClient := &handlers.AWSClientImpl{}
+		awsClient.OpenSearch = opensearchClient
+		awsClient.CloudWatch = cwClient
+
+		return runOpenSearchCmd(ctx, &prompterClient, output, awsClient, flagValues, logger)
+	},
+}
+
+func init() {
+	opensearchCmd.Flags().Int("days-no-indexing", 7, "Consider domains orphaned if no indexing for this many days")
+	opensearchCmd.Flags().Int("hours-no-searches", 24, "Consider domains orphaned if no searches for this many hours")
+}
+
+func runOpenSearchCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any, logger *logging.Logger) error {
+	command := &AWSCommand{
+		AWSClient: *awsClient,
+		Logger:    logger,
+		Prompter:  *prompter,
+		Output:    output,
+	}
+
+	return command.executeOpenSearch(ctx, flagValues)
+}
+
+func (a *AWSCommand) executeOpenSearch(ctx context.Context, flagValues *map[string]any) error {
+	rootCtx := ctx
+	collectDeletes := (*flagValues)["delete"].(bool)
+	daysNoIndexing := int64((*flagValues)["days-no-indexing"].(int))
+	hoursNoSearches := int64((*flagValues)["hours-no-searches"].(int))
+
+	domainNameChan := make(chan string, 50)
+	resultsChan := make(chan table.Row, 50)
+	orphanDomains := []orphanOpenSearchDomain{}
+
+	g, egCtx := errgroup.WithContext(ctx)
+
+	// Goroutine to list all OpenSearch domain names
+	g.Go(func() error {
+		defer close(domainNameChan)
+		output, err := a.AWSClient.OpenSearch.ListDomainNames(egCtx, &opensearch.ListDomainNamesInput{})
+		if err != nil {
+			a.Logger.LogError("Error listing OpenSearch domains", err, nil, false)
+			return err
+		}
+		for _, domainInfo := range output.DomainNames {
+			select {
+			case domainNameChan <- aws.ToString(domainInfo.DomainName):
+			case <-egCtx.Done():
+				return egCtx.Err()
+			}
+		}
+		return nil
+	})
+
+	// Worker goroutines to check each domain
+	numWorkers := NumGoroutines
+	for range numWorkers {
+		g.Go(func() error {
+			for {
+				select {
+				case <-egCtx.Done():
+					return nil
+				case domainName, ok := <-domainNameChan:
+					if !ok {
+						return nil
+					}
+
+					// Get domain details
+					domainOutput, err := a.AWSClient.OpenSearch.DescribeDomain(egCtx, &opensearch.DescribeDomainInput{
+						DomainName: aws.String(domainName),
+					})
+					if err != nil {
+						a.Logger.LogError("Error describing OpenSearch domain", err, map[string]any{
+							"domain": domainName,
+						}, false)
+						continue
+					}
+
+					orphan, err := a.checkOpenSearchOrphan(egCtx, domainOutput.DomainStatus, daysNoIndexing, hoursNoSearches)
+					if err != nil {
+						a.Logger.LogError("Error checking OpenSearch domain", err, map[string]any{
+							"domain": domainName,
+						}, false)
+						continue
+					}
+
+					if orphan != nil {
+						select {
+						case resultsChan <- table.Row{
+							orphan.DomainName,
+							orphan.EngineVersion,
+							orphan.InstanceType,
+							orphan.InstanceCount,
+							fmt.Sprintf("%d GB", orphan.StorageSize),
+							orphan.Created,
+							fmt.Sprintf("%d days", orphan.DaysSinceActivity),
+							orphan.Reason,
+						}:
+						case <-egCtx.Done():
+							return egCtx.Err()
+						}
+						orphanDomains = append(orphanDomains, *orphan)
+					}
+				}
+			}
+		})
+	}
+
+	// Goroutine to collect results and print
+	headers := []string{"Domain Name", "Version", "Instance Type", "Instances", "Storage", "Created", "Days Since Activity", "Reason"}
+
+	t := printer.NewStreamTable(a.Output, false, headers)
+	defer t.Close()
+
+	go func() {
+		for row := range resultsChan {
+			t.WriteRow(row...)
+		}
+	}()
+
+	if err := g.Wait(); err != nil {
+		close(resultsChan)
+		return err
+	}
+	close(resultsChan)
+	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish writing
+
+	a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned OpenSearch domains", len(orphanDomains)), nil)
+
+	if collectDeletes && len(orphanDomains) > 0 {
+		confirm, err := confirmDelete(a.Prompter, a.Logger)
+		if err != nil || !confirm {
+			return err
+		}
+
+		a.Logger.LogInfo("Deleting orphaned OpenSearch domains...", nil)
+		for _, domain := range orphanDomains {
+			if err := a.deleteOpenSearchDomain(rootCtx, domain.DomainName); err != nil {
+				a.Logger.LogError("Failed to delete OpenSearch domain", err, map[string]any{
+					"domain": domain.DomainName,
+				}, false)
+				return err
+			}
+			a.Logger.LogInfo(fmt.Sprintf("Deleted OpenSearch domain: %s", domain.DomainName), nil)
+		}
+	}
+
+	return nil
+}
+
+func (a *AWSCommand) checkOpenSearchOrphan(ctx context.Context, domain *opensearchtypes.DomainStatus, daysNoIndexing, hoursNoSearches int64) (*orphanOpenSearchDomain, error) {
+	domainName := aws.ToString(domain.DomainName)
+
+	// Check indexing operations metric
+	endTime := time.Now()
+	indexingStartTime := endTime.Add(-time.Duration(daysNoIndexing) * 24 * time.Hour)
+
+	indexingInput := &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("AWS/ES"), // Both ES and OpenSearch use AWS/ES namespace
+		MetricName: aws.String("IndexingRate"),
+		Dimensions: []cloudwatchtypes.Dimension{
+			{
+				Name:  aws.String("DomainName"),
+				Value: aws.String(domainName),
+			},
+			{
+				Name:  aws.String("ClientId"),
+				Value: domain.ARN, // Use account ID from ARN
+			},
+		},
+		StartTime:  &indexingStartTime,
+		EndTime:    &endTime,
+		Period:     aws.Int32(86400), // 1 day
+		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
+	}
+
+	indexingOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, indexingInput)
+	if err != nil {
+		return nil, err
+	}
+
+	hasIndexing := false
+	for _, datapoint := range indexingOutput.Datapoints {
+		if datapoint.Sum != nil && *datapoint.Sum > 0 {
+			hasIndexing = true
+			break
+		}
+	}
+
+	// Check search requests metric
+	searchStartTime := endTime.Add(-time.Duration(hoursNoSearches) * time.Hour)
+
+	searchInput := &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("AWS/ES"),
+		MetricName: aws.String("SearchRate"),
+		Dimensions: []cloudwatchtypes.Dimension{
+			{
+				Name:  aws.String("DomainName"),
+				Value: aws.String(domainName),
+			},
+			{
+				Name:  aws.String("ClientId"),
+				Value: domain.ARN,
+			},
+		},
+		StartTime:  &searchStartTime,
+		EndTime:    &endTime,
+		Period:     aws.Int32(3600), // 1 hour
+		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
+	}
+
+	searchOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, searchInput)
+	if err != nil {
+		return nil, err
+	}
+
+	hasSearches := false
+	for _, datapoint := range searchOutput.Datapoints {
+		if datapoint.Sum != nil && *datapoint.Sum > 0 {
+			hasSearches = true
+			break
+		}
+	}
+
+	// Determine if orphaned (must have both no indexing AND no searches)
+	if hasIndexing || hasSearches {
+		return nil, nil
+	}
+
+	// OpenSearch DomainStatus doesn't expose creation date directly
+	// We'll estimate based on search/indexing activity period
+	daysSinceCreation := daysNoIndexing
+	createdDate := "N/A"
+
+	instanceCount := 1
+	instanceType := "unknown"
+	if domain.ClusterConfig != nil {
+		if domain.ClusterConfig.InstanceCount != nil {
+			instanceCount = int(*domain.ClusterConfig.InstanceCount)
+		}
+		if domain.ClusterConfig.InstanceType != "" {
+			instanceType = string(domain.ClusterConfig.InstanceType)
+		}
+	}
+
+	storageSize := int32(0)
+	if domain.EBSOptions != nil && domain.EBSOptions.VolumeSize != nil {
+		storageSize = *domain.EBSOptions.VolumeSize * int32(instanceCount)
+	}
+
+	return &orphanOpenSearchDomain{
+		DomainName:        domainName,
+		EngineVersion:     aws.ToString(domain.EngineVersion),
+		InstanceType:      instanceType,
+		InstanceCount:     instanceCount,
+		StorageSize:       storageSize,
+		Created:           createdDate,
+		NoIndexing:        !hasIndexing,
+		NoSearching:       !hasSearches,
+		DaysSinceActivity: daysSinceCreation,
+		Reason:            fmt.Sprintf("No indexing (%dd) & no searches (%dh)", daysNoIndexing, hoursNoSearches),
+	}, nil
+}
+
+func (a *AWSCommand) deleteOpenSearchDomain(ctx context.Context, domainName string) error {
+	_, err := a.AWSClient.OpenSearch.DeleteDomain(ctx, &opensearch.DeleteDomainInput{
+		DomainName: aws.String(domainName),
+	})
+	return err
+}

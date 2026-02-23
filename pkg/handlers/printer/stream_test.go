@@ -45,7 +45,7 @@ func TestStreamTable_SortAndRenumberIndex(t *testing.T) {
 	}
 
 	var aaaLine, bbbLine string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.Contains(line, "aaa") {
 			aaaLine = line
 		}

@@ -24,3 +24,10 @@ go.work.sum
 # VScode config files
 .vscode
 .opencommit-commitlint
+
+# Investigation and scratch work
+investigations/
+
+# Compiled binary
+cor
+remotestore_stats_all.json

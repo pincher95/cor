@@ -18,8 +18,10 @@ package cmd
 
 import (
 	"path"
+	"sort"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 )
@@ -116,4 +118,45 @@ func tagsMatchFilters(tags map[string]string, filters []tagFilter) bool {
 		}
 	}
 	return true
+}
+
+// elbTagsToMap converts ELB tags (both classic and v2) to a map.
+// This is a generic function that works with any tag type that has Key and Value fields.
+func elbTagsToMap[T any](tags []T, keyExtractor, valueExtractor func(T) *string) map[string]string {
+	if len(tags) == 0 {
+		return map[string]string{}
+	}
+	tagMap := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		key := aws.ToString(keyExtractor(tag))
+		if key == "" {
+			continue
+		}
+		tagMap[key] = aws.ToString(valueExtractor(tag))
+	}
+	return tagMap
+}
+
+// formatElbTags formats a tag map into a sorted, newline-separated string.
+// Returns "-" if no tags are present.
+func formatElbTags(tags map[string]string) string {
+	if len(tags) == 0 {
+		return "-"
+	}
+	values := make([]string, 0, len(tags))
+	for key, value := range tags {
+		if key == "" {
+			continue
+		}
+		if value == "" {
+			values = append(values, key)
+		} else {
+			values = append(values, key+"="+value)
+		}
+	}
+	if len(values) == 0 {
+		return "-"
+	}
+	sort.Strings(values)
+	return strings.Join(values, "\n")
 }

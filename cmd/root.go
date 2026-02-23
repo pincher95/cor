@@ -90,6 +90,12 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(clientVPNCmd)
 	rootCmd.AddCommand(vpnConnectionsCmd)
 	rootCmd.AddCommand(tgwAttachmentsCmd)
+	rootCmd.AddCommand(lambdaCmd)
+	rootCmd.AddCommand(elasticacheCmd)
+	rootCmd.AddCommand(opensearchCmd)
+	rootCmd.AddCommand(dynamodbCmd)
+	rootCmd.AddCommand(s3bucketsCmd)
+	rootCmd.AddCommand(ecsCmd)
 }
 
 func init() {

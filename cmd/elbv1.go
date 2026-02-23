@@ -18,7 +18,6 @@ package cmd
 import (
 	"context"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 
@@ -102,23 +101,18 @@ var elbv1Cmd = &cobra.Command{
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
 		defer stream.Close()
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := describeLoadBalancers(ctx, client, loadBalancerChan); err != nil {
 				errorChan <- err
 				close(loadBalancerChan)
 				return
 			}
 			close(loadBalancerChan)
-		}()
+		})
 
 		// Start a goroutine to process load balancers
 		for lb := range loadBalancerChan {
-			lb := lb
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if !matchesFilterValue(aws.ToString(lb.LoadBalancerName), filterByName) {
 					return
 				}
@@ -130,7 +124,7 @@ var elbv1Cmd = &cobra.Command{
 				if tableRow != nil {
 					tableRowChan <- elbv1Result{row: tableRow, deleteName: deleteName}
 				}
-			}()
+			})
 		}
 
 		doneChan := make(chan struct{})
@@ -365,46 +359,9 @@ func describeClassicElbTags(ctx context.Context, client *elasticloadbalancing.Cl
 	}
 	for _, desc := range resp.TagDescriptions {
 		if aws.ToString(desc.LoadBalancerName) == loadBalancerName {
-			tagMap := classicElbTagsToMap(desc.Tags)
-			return tagMap, formatClassicElbTags(tagMap), nil
+			tagMap := elbTagsToMap(desc.Tags, func(t types.Tag) *string { return t.Key }, func(t types.Tag) *string { return t.Value })
+			return tagMap, formatElbTags(tagMap), nil
 		}
 	}
 	return map[string]string{}, "-", nil
-}
-
-func classicElbTagsToMap(tags []types.Tag) map[string]string {
-	if len(tags) == 0 {
-		return map[string]string{}
-	}
-	tagMap := make(map[string]string, len(tags))
-	for _, tag := range tags {
-		key := aws.ToString(tag.Key)
-		if key == "" {
-			continue
-		}
-		tagMap[key] = aws.ToString(tag.Value)
-	}
-	return tagMap
-}
-
-func formatClassicElbTags(tags map[string]string) string {
-	if len(tags) == 0 {
-		return "-"
-	}
-	values := make([]string, 0, len(tags))
-	for key, value := range tags {
-		if key == "" {
-			continue
-		}
-		if value == "" {
-			values = append(values, key)
-		} else {
-			values = append(values, key+"="+value)
-		}
-	}
-	if len(values) == 0 {
-		return "-"
-	}
-	sort.Strings(values)
-	return strings.Join(values, "\n")
 }

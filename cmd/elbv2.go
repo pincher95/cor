@@ -19,7 +19,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -366,7 +365,6 @@ func (e *AWSCommand) processLoadBalancer(ctx context.Context, targetGroups []typ
 	// Process each target group concurrently using an errgroup.
 	g, ctx := errgroup.WithContext(ctx)
 	for _, tg := range targetGroups {
-		tg := tg // capture loop variable
 		g.Go(func() error {
 			resp, err := e.AWSClient.DescribeTargetHealth(ctx, &elasticloadbalancingv2.DescribeTargetHealthInput{
 				TargetGroupArn: tg.TargetGroupArn,
@@ -494,8 +492,6 @@ func (e *AWSCommand) deleteTargetGroups(ctx context.Context, targetGroupNames []
 	return nil
 }
 
-// Legacy pretty-table printer removed in favor of streaming output for low memory usage.
-
 func (e *AWSCommand) describeElbv2Tags(ctx context.Context, loadBalancerArn string) (map[string]string, string, error) {
 	if loadBalancerArn == "" {
 		return map[string]string{}, "-", nil
@@ -508,48 +504,11 @@ func (e *AWSCommand) describeElbv2Tags(ctx context.Context, loadBalancerArn stri
 	}
 	for _, desc := range resp.TagDescriptions {
 		if aws.ToString(desc.ResourceArn) == loadBalancerArn {
-			tagMap := elbv2TagsToMap(desc.Tags)
-			return tagMap, formatElbv2Tags(tagMap), nil
+			tagMap := elbTagsToMap(desc.Tags, func(t types.Tag) *string { return t.Key }, func(t types.Tag) *string { return t.Value })
+			return tagMap, formatElbTags(tagMap), nil
 		}
 	}
 	return map[string]string{}, "-", nil
-}
-
-func elbv2TagsToMap(tags []types.Tag) map[string]string {
-	if len(tags) == 0 {
-		return map[string]string{}
-	}
-	tagMap := make(map[string]string, len(tags))
-	for _, tag := range tags {
-		key := aws.ToString(tag.Key)
-		if key == "" {
-			continue
-		}
-		tagMap[key] = aws.ToString(tag.Value)
-	}
-	return tagMap
-}
-
-func formatElbv2Tags(tags map[string]string) string {
-	if len(tags) == 0 {
-		return "-"
-	}
-	values := make([]string, 0, len(tags))
-	for key, value := range tags {
-		if key == "" {
-			continue
-		}
-		if value == "" {
-			values = append(values, key)
-		} else {
-			values = append(values, key+"="+value)
-		}
-	}
-	if len(values) == 0 {
-		return "-"
-	}
-	sort.Strings(values)
-	return strings.Join(values, "\n")
 }
 
 // checkInstanceExists verifies via the EC2 API whether an instance exists for a target ID or IP.

@@ -25,8 +25,11 @@ import (
 type fakeRetriever struct {
 	strings map[string]string
 	bools   map[string]bool
+	ints    map[string]int
 	changed map[string]bool
 }
+
+func (f *fakeRetriever) GetInt(name string) (int, error) { return f.ints[name], nil }
 
 func (f *fakeRetriever) GetString(name string) (string, error) { return f.strings[name], nil }
 func (f *fakeRetriever) GetBool(name string) (bool, error)     { return f.bools[name], nil }
@@ -100,7 +103,7 @@ func TestGetFlags_AdditionalFlagsAndUnsupportedType(t *testing.T) {
 	}
 
 	// unsupported type
-	_, err = GetFlags(r, []Flag{{Name: "x", Type: "int"}})
+	_, err = GetFlags(r, []Flag{{Name: "x", Type: "float"}})
 	if err == nil {
 		t.Fatalf("expected error for unsupported type")
 	}

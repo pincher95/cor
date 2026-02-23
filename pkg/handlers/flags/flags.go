@@ -27,6 +27,7 @@ import (
 type FlagRetriever interface {
 	GetString(name string) (string, error)
 	GetBool(name string) (bool, error)
+	GetInt(name string) (int, error)
 	// IsChanged returns true if a flag value was explicitly provided on the CLI.
 	// This is used to ensure correct precedence: CLI > config file > env > defaults.
 	IsChanged(name string) bool
@@ -40,7 +41,7 @@ type CommandFlagRetriever struct {
 // Flag represents a flag with its name and type.
 type Flag struct {
 	Name string
-	Type string // "string" or "bool"
+	Type string // "string", "bool", or "int"
 }
 
 // GetString retrieves a string flag from the cobra command.
@@ -64,6 +65,17 @@ func (r *CommandFlagRetriever) GetBool(name string) (bool, error) {
 		return r.Cmd.InheritedFlags().GetBool(name)
 	}
 	return r.Cmd.PersistentFlags().GetBool(name)
+}
+
+// GetInt retrieves an integer flag from the cobra command.
+func (r *CommandFlagRetriever) GetInt(name string) (int, error) {
+	if r.Cmd.Flags().Lookup(name) != nil {
+		return r.Cmd.Flags().GetInt(name)
+	}
+	if r.Cmd.InheritedFlags().Lookup(name) != nil {
+		return r.Cmd.InheritedFlags().GetInt(name)
+	}
+	return r.Cmd.PersistentFlags().GetInt(name)
 }
 
 func (r *CommandFlagRetriever) IsChanged(name string) bool {
@@ -101,6 +113,12 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]
 				break
 			}
 			results[flag.Name], err = flagRetriever.GetBool(flag.Name)
+		case "int":
+			if !flagRetriever.IsChanged(flag.Name) && viper.IsSet(flag.Name) {
+				results[flag.Name] = viper.GetInt(flag.Name)
+				break
+			}
+			results[flag.Name], err = flagRetriever.GetInt(flag.Name)
 		default:
 			err = fmt.Errorf("unsupported flag type: %s", flag.Type)
 		}

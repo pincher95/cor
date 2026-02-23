@@ -25,6 +25,41 @@ COR currently supports:
 - **Client VPN**: endpoints with zero active connections (`clientvpn`)
 - **Site-to-Site VPN**: connections with no tunnels up (`vpnconnections`)
 - **Transit Gateway**: VPC attachments without route table association (`tgwattachments`)
+- **Lambda Functions**: functions not invoked in 90+ days, old versions, unused provisioned concurrency (`lambda`)
+- **ElastiCache**: clusters with zero connections for 24+ hours (`elasticache`)
+- **OpenSearch**: domains with no indexing/search activity (`opensearch`)
+- **DynamoDB Tables**: tables with zero read/write activity, empty tables (`dynamodb`)
+- **S3 Buckets**: empty buckets, incomplete multipart uploads (`s3buckets`)
+- **ECS Clusters**: clusters with no services or running tasks (`ecs`)
+
+### Cost Impact
+
+COR helps identify resources that continue to incur AWS charges even when orphaned or unused:
+
+- **EBS Volumes**: ~$0.08-0.10/GB-month (gp3), ~$0.10/GB-month (gp2)
+- **EBS Snapshots**: ~$0.05/GB-month
+- **AMIs**: Includes underlying snapshot costs
+- **Elastic IPs**: $0.005/hour when unassociated (~$3.60/month)
+- **NAT Gateways**: ~$0.045/hour + data transfer (~$32/month minimum)
+- **ALB/NLB**: ~$0.0225/hour (~$16/month per load balancer)
+- **Classic ELB**: ~$0.025/hour (~$18/month)
+- **RDS Instances**: Varies by instance type (even when stopped, snapshots incur costs)
+- **RDS Snapshots**: ~$0.095/GB-month
+- **CloudWatch Logs**: $0.50/GB ingestion + $0.03/GB-month storage
+- **EFS**: $0.30/GB-month (Standard), $0.016/GB-month (Infrequent Access)
+- **ECR**: $0.10/GB-month for storage
+- **Route53 Hosted Zones**: $0.50/month per zone
+- **VPC Endpoints**: ~$0.01/hour per AZ (~$7/month)
+- **Client VPN**: ~$0.10/hour (~$72/month)
+- **Site-to-Site VPN**: ~$0.05/hour per connection (~$36/month)
+- **Lambda Functions**: Provisioned concurrency $100-500/month per function; storage for old versions
+- **ElastiCache**: cache.m5.large ~$105/month, cache.r6g.xlarge ~$217/month
+- **OpenSearch**: t3.small.search ~$26/month, r6g.large.search ~$101/month + $0.135/GB-month storage
+- **DynamoDB Tables**: Provisioned mode $0.00065/hour per WCU, $0.00013/hour per RCU; storage $0.25/GB-month
+- **S3 Buckets**: Storage $0.023/GB-month (Standard); request costs; incomplete uploads consume storage
+- **ECS Clusters**: Free, but prevents cleanup of NAT Gateway, ALB, and related infrastructure
+
+*Note: Prices are approximate and vary by region. Check current AWS pricing for your region.*
 
 ### Install
 
@@ -74,23 +109,142 @@ Example env vars:
 
 ### Examples
 
-List orphaned EBS volumes:
+**List orphaned EBS volumes:**
 
 ```bash
 ./cor volumes --region us-east-1 --profile default
 ```
 
-Delete orphaned EBS volumes (will prompt):
+**Delete orphaned EBS volumes (will prompt):**
 
 ```bash
 ./cor volumes --delete
 ```
 
-List orphan AMIs, including those used by instances:
+**Filter ELB by name pattern:**
+
+```bash
+./cor elbv1 --filter-by-name "prod-*" --show-tags
+```
+
+**Filter resources by tags:**
+
+```bash
+./cor volumes --filter-by-tags "Environment=dev,Owner=team-a"
+./cor elbv2 --filter-by-tags "CostCenter=engineering"
+```
+
+**Sort output for easier analysis:**
+
+```bash
+./cor snapshots --sort-by "Size" --sort-desc
+./cor volumes --sort-by "CreateTime"
+```
+
+**Use config file for consistent settings:**
+
+```bash
+./cor --config ./prod-config.yaml volumes
+```
+
+**List orphan AMIs, including those used by instances:**
 
 ```bash
 ./cor images --include-used-by-instance
 ```
+
+**Check ECR for old/untagged images (30+ days):**
+
+```bash
+./cor ecr --days-old 30
+```
+
+**Find Route53 zones with only NS/SOA records:**
+
+```bash
+./cor route53zones
+```
+
+**List RDS instances and manual snapshots:**
+
+```bash
+./cor rds
+```
+
+**Find Lambda functions not invoked in 90+ days:**
+
+```bash
+./cor lambda
+./cor lambda --days-since-invocation 180  # Custom threshold
+```
+
+**Find idle ElastiCache clusters:**
+
+```bash
+./cor elasticache
+./cor elasticache --hours-zero-connections 48  # Zero connections for 48+ hours
+```
+
+**Find orphaned OpenSearch domains:**
+
+```bash
+./cor opensearch
+./cor opensearch --days-no-indexing 14 --hours-no-searches 48  # Custom thresholds
+```
+
+**Find idle DynamoDB tables:**
+
+```bash
+./cor dynamodb
+./cor dynamodb --days-no-activity 60  # No activity for 60+ days
+```
+
+**Find orphaned S3 buckets:**
+
+```bash
+./cor s3buckets
+./cor s3buckets --check-lifecycle  # Also check for missing lifecycle policies
+```
+
+**Find empty ECS clusters:**
+
+```bash
+./cor ecs
+```
+
+### Troubleshooting
+
+**Permission Denied Errors**
+
+- Ensure your IAM user/role has read permissions for the resource type you're checking
+- For delete operations, write/delete permissions are required
+- Common required permissions: `ec2:Describe*`, `elasticloadbalancing:Describe*`, `rds:Describe*`, etc.
+- Use AWS IAM Policy Simulator to verify permissions
+
+**Timeout Issues**
+
+- Use the `--timeout` flag to increase execution time for large environments
+- Consider filtering by region or resource tags to reduce scope
+- Some commands (like snapshots, images) can take longer in accounts with many resources
+
+**No Resources Found**
+
+- Verify you're using the correct region with `--region` or `-r`
+- Check that resource state filters match your use case (e.g., volumes must be in 'available' state)
+- Ensure your credentials have permission to view the resources
+- Try running with `--profile` to verify you're using the correct AWS account
+
+**Rate Limiting / Throttling**
+
+- AWS APIs have rate limits; COR implements retries with exponential backoff
+- If you consistently hit limits, consider running during off-peak hours
+- Use filtering options to reduce the number of API calls
+
+**Memory Issues**
+
+- COR uses streaming output by default to keep memory usage low
+- Avoid using `--sort-by` for very large result sets (requires buffering all results)
+- If issues persist, check for resource leaks or file an issue on GitHub
 
 ### Development
 

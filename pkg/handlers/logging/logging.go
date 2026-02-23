@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 // Logger is a structured logger.
@@ -36,28 +37,30 @@ func NewLogger() *Logger {
 
 // LogError logs an error with a message and context.
 func (l *Logger) LogError(message string, err error, context map[string]any, exit bool) {
-	logMessage := message
+	var logMessage strings.Builder
+	logMessage.WriteString(message)
 	if err != nil {
-		logMessage += ": " + err.Error()
+		logMessage.WriteString(": " + err.Error())
 	}
 	if context != nil {
-		logMessage += " | Context: "
+		logMessage.WriteString(" | Context: ")
 		for key, value := range context {
-			logMessage += fmt.Sprintf("%s=%v ", key, value)
+			fmt.Fprintf(&logMessage, "%s=%v ", key, value)
 		}
 	}
-	l.logger.Println(logMessage)
+	l.logger.Println(logMessage.String())
 	// Do not exit the process here; callers should decide on termination.
 }
 
 // LogInfo logs an informational message with context.
 func (l *Logger) LogInfo(message string, context map[string]any) {
-	logMessage := message
+	var logMessage strings.Builder
+	logMessage.WriteString(message)
 	if context != nil {
-		logMessage += " | Context: "
+		logMessage.WriteString(" | Context: ")
 		for key, value := range context {
-			logMessage += fmt.Sprintf("%s=%v ", key, value)
+			fmt.Fprintf(&logMessage, "%s=%v ", key, value)
 		}
 	}
-	l.logger.Println(logMessage)
+	l.logger.Println(logMessage.String())
 }

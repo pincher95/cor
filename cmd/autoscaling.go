@@ -183,5 +183,3 @@ func init() {
 	autoscalingCmd.Flags().String("filter-by-name", "", "Filter by Auto Scaling Group name (substring match).")
 	autoscalingCmd.Flags().Bool("force", false, "Force delete ASG (use with caution).")
 }
-
-// Legacy pretty-table printer removed in favor of streaming output for low memory usage.
