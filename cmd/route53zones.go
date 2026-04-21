@@ -18,8 +18,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,9 +25,7 @@ import (
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -38,51 +34,21 @@ var route53ZonesCmd = &cobra.Command{
 	Short: "List and optionally delete Route53 hosted zones with only NS/SOA records",
 	Long:  `List hosted zones that appear empty (only NS/SOA records) and optionally delete them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"},
-			{Name: "include-non-empty", Type: "bool"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		r53Client := route53.NewFromConfig(*cfg)
-		awsClient := &handlers.AWSClientImpl{R53: r53Client}
-
-		return runRoute53ZonesCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "include-non-empty", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{R53: route53.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeRoute53Zones)
 	},
 }
 
 func init() {
 	route53ZonesCmd.Flags().String("filter-by-name", "", "Filter hosted zones by name (substring match).")
 	route53ZonesCmd.Flags().Bool("include-non-empty", false, "Include zones that have records beyond NS/SOA.")
-}
-
-func runRoute53ZonesCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeRoute53Zones(ctx, flagValues)
 }
 
 func (r *AWSCommand) executeRoute53Zones(ctx context.Context, flagValues *map[string]any) error {

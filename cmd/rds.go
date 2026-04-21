@@ -17,8 +17,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -26,9 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -38,63 +34,21 @@ var rdsCmd = &cobra.Command{
 	Short: "Find stopped RDS instances and manual snapshots",
 	Long:  `List and optionally delete stopped RDS instances and manual DB snapshots.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "include-instances", Type: "bool"},
-			{Name: "include-snapshots", Type: "bool"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		// If neither flag is set, default to both true
-		incInst := (*flagValues)["include-instances"].(bool)
-		incSnap := (*flagValues)["include-snapshots"].(bool)
-		if !incInst && !incSnap {
-			(*flagValues)["include-instances"] = true
-			(*flagValues)["include-snapshots"] = true
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		rdsClient := rds.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{
-			RDS: rdsClient,
-		}
-
-		return runRDSCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "include-instances", Type: "bool"},
+				{Name: "include-snapshots", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{RDS: rds.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeRDS)
 	},
 }
 
 func init() {
 	rdsCmd.Flags().Bool("include-instances", false, "Include stopped RDS instances")
 	rdsCmd.Flags().Bool("include-snapshots", false, "Include manual RDS snapshots")
-}
-
-func runRDSCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeRDS(ctx, flagValues)
 }
 
 type rdsResource struct {

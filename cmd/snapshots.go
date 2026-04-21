@@ -17,8 +17,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,9 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -39,65 +35,15 @@ var snapshotsCmd = &cobra.Command{
 	Short: "Return Snapshots not associated with AMI, Volumes or created by Lifecycle policy",
 	Long:  ``,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Create prompter using the prompter package
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-
-		// Create a new context
-		ctx := cmd.Context()
-
-		// Get the flags from the command and also the additional flags specific to this command
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-
-		// Specify additional flags that are specific to this command
-		additionalFlags := []flags.Flag{
-			{
-				Name: "filter-by-name",
-				Type: "string",
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
 			},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		// Create a new EC2 client
-		ec2Client := ec2.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{
-			EC2: ec2Client,
-		}
-
-		return runSnapshotCmd(ctx, prompterClient, output, *awsClient, flagValues)
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeSnapShot)
 	},
-}
-
-func runSnapshotCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient handlers.AWSClientImpl, flagValues *map[string]any) error {
-
-	// Create a new logger and error handler
-	logger := logging.NewLogger()
-
-	// Create an instance of elbv2Command
-	command := &AWSCommand{
-		AWSClient: awsClient,
-		Logger:    logger,
-		Prompter:  prompter,
-		Output:    output,
-	}
-
-	return command.executeSnapShot(ctx, flagValues)
 }
 
 func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]any) error {
