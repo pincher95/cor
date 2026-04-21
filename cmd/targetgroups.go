@@ -127,6 +127,9 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 			return []any{r.name, r.arn, r.targetType, r.protocol, r.port, r.vpcID, r.attached}
 		},
 		Delete: func(ctx context.Context, r orphanTargetGroup) error {
+			if r.attached > 0 {
+				return nil // never delete attached target groups, even when --include-attached shows them
+			}
 			t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": r.arn})
 			_, err := t.AWSClient.ELB.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{TargetGroupArn: aws.String(r.arn)})
 			return err
