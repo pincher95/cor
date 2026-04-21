@@ -19,42 +19,42 @@ import (
 
 // OrphanPipeline declares per-command variation for runOrphanPipeline.
 //
-// I is the item type produced by List (typically an AWS SDK type such as
-// ec2types.Volume). R is the result type produced by Process — a
+// Item is the item type produced by List (typically an AWS SDK type such as
+// ec2types.Volume). Result is the result type produced by Process — a
 // command-owned struct carrying the row cells plus whatever delete
 // metadata Delete needs.
 //
 // Required fields: Headers, List, Process, ToRow.
 // Optional: Finalize (write a footer row like totals), Delete (enables
 // --delete for this command; nil makes --delete a no-op).
-type OrphanPipeline[I, R any] struct {
+type OrphanPipeline[Item, Result any] struct {
 	Headers []string
 
 	// List paginates or lists the resource type. It must call emit once
 	// per item; emit handles the context-aware handoff to the worker
 	// pool. If emit returns a non-nil error, List must propagate it
 	// (the error signals that the pipeline is shutting down).
-	List func(ctx context.Context, emit func(I) error) error
+	List func(ctx context.Context, emit func(Item) error) error
 
 	// Process performs per-item enrichment and filtering. Return (nil,
 	// nil) to skip an item without signalling an error; return
 	// (nil, err) to abort the whole pipeline.
-	Process func(ctx context.Context, item I) (*R, error)
+	Process func(ctx context.Context, item Item) (*Result, error)
 
 	// ToRow converts a result into the cells of a single streamed row.
 	// The returned slice length must match len(Headers).
-	ToRow func(r R) []any
+	ToRow func(r Result) []any
 
 	// Finalize runs after all rows are streamed; if it returns a
 	// non-nil slice it is written as one final row (e.g. totals).
 	// Optional.
-	Finalize func(results []R) []any
+	Finalize func(results []Result) []any
 
 	// Delete is invoked per result during the --delete phase with the
 	// original, non-errgroup context so post-g.Wait() cancellations
 	// don't block the delete call. Nil disables --delete for this
 	// command.
-	Delete func(ctx context.Context, r R) error
+	Delete func(ctx context.Context, r Result) error
 }
 
 // runOrphanPipeline runs the shared producer → workers → collector pattern
@@ -68,25 +68,25 @@ type OrphanPipeline[I, R any] struct {
 // Implemented as a top-level function (not a method on *AWSCommand)
 // because Go does not permit methods with type parameters; the
 // *AWSCommand receiver is threaded as the first argument instead.
-func runOrphanPipeline[I, R any](
+func runOrphanPipeline[Item, Result any](
 	a *AWSCommand,
 	ctx context.Context,
 	flagValues *map[string]any,
-	spec OrphanPipeline[I, R],
+	spec OrphanPipeline[Item, Result],
 ) error {
 	rootCtx := ctx
 
 	collectDeletes := (*flagValues)["delete"].(bool) && spec.Delete != nil
 
-	itemChan := make(chan I, 50)
-	resultChan := make(chan R, 50)
+	itemChan := make(chan Item, 50)
+	resultChan := make(chan Result, 50)
 
 	g, egCtx := errgroup.WithContext(ctx)
 
 	// Producer: drains spec.List into itemChan.
 	g.Go(func() error {
 		defer close(itemChan)
-		return spec.List(egCtx, func(item I) error {
+		return spec.List(egCtx, func(item Item) error {
 			select {
 			case itemChan <- item:
 				return nil
@@ -121,7 +121,7 @@ func runOrphanPipeline[I, R any](
 	}
 
 	// Collector: streams rows as they arrive, keeps a slice for delete.
-	collected := make([]R, 0)
+	collected := make([]Result, 0)
 	collectorDone := make(chan struct{})
 	go func() {
 		defer close(collectorDone)
