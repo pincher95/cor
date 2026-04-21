@@ -23,13 +23,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
+
+type orphanTargetGroup struct {
+	name, arn, targetType, protocol, vpcID string
+	port                                   int32
+	attached                               int
+}
 
 // targetgroupsCmd represents the targetgroups command
 var targetgroupsCmd = &cobra.Command{
@@ -58,149 +61,80 @@ func init() {
 }
 
 func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[string]any) error {
-	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
-	rootCtx := ctx
-
-	collectDeletes := (*flagValues)["delete"].(bool)
-
-	tgChan := make(chan elbtypes.TargetGroup, 50)
-	resultsChan := make(chan table.Row, 50)
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	g.Go(func() error {
-		p := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(t.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{})
-		for p.HasMorePages() {
-			page, err := p.NextPage(egCtx)
-			if err != nil {
-				close(tgChan)
-				return err
-			}
-			for _, tg := range page.TargetGroups {
-				tgChan <- tg
-			}
-		}
-		close(tgChan)
-		return nil
-	})
-
 	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 	includeAttached := (*flagValues)["include-attached"].(bool)
 
-	for range NumGoroutines {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return egCtx.Err()
-				case tg, ok := <-tgChan:
-					if !ok {
-						return nil
+	return runOrphanPipeline(t, ctx, flagValues, OrphanPipeline[elbtypes.TargetGroup, orphanTargetGroup]{
+		Headers: []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"},
+		List: func(ctx context.Context, emit func(elbtypes.TargetGroup) error) error {
+			p := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(t.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, tg := range page.TargetGroups {
+					if err := emit(tg); err != nil {
+						return err
 					}
-
-					name := aws.ToString(tg.TargetGroupName)
-					if filterByName != "" && !strings.Contains(name, filterByName) {
-						continue
-					}
-
-					attachedCount := 0
-					if tg.LoadBalancerArns != nil {
-						attachedCount = len(tg.LoadBalancerArns)
-					}
-					if !includeAttached && attachedCount > 0 {
-						continue
-					}
-
-					arn := aws.ToString(tg.TargetGroupArn)
-					if arn == "" {
-						continue
-					}
-					vpcID := aws.ToString(tg.VpcId)
-					if vpcID == "" {
-						vpcID = "-"
-					}
-
-					proto := string(tg.Protocol)
-					if proto == "" {
-						proto = "-"
-					}
-					port := int32(0)
-					if tg.Port != nil {
-						port = *tg.Port
-					}
-					tgType := string(tg.TargetType)
-					if tgType == "" {
-						tgType = "-"
-					}
-
-					resultsChan <- table.Row{name, arn, tgType, proto, port, vpcID, attachedCount}
 				}
 			}
-		})
-	}
-
-	// Stream output + optional delete
-	printDone := make(chan []string, 1)
-	go func() {
-		stream := printer.NewStreamTable(t.Output, true, []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"})
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		deleteArns := make([]string, 0)
-		finish := func() {
-			stream.Close()
-			printDone <- deleteArns
-		}
-
-		for row := range resultsChan {
-			stream.WriteRow(row...)
-
-			if collectDeletes {
-				// Name, Arn, Type, Protocol, Port, VpcId, AttachedCount
-				if len(row) < 7 {
-					continue
-				}
-				arn, _ := row[1].(string)
-				attachedCount, _ := row[6].(int)
-				if attachedCount > 0 {
-					continue
-				}
-				if arn == "" || arn == "-" {
-					continue
-				}
-				deleteArns = append(deleteArns, arn)
-			}
-		}
-		finish()
-	}()
-
-	if err := g.Wait(); err != nil {
-		t.Logger.LogError("Error during target group processing", err, nil, false)
-		return err
-	}
-	close(resultsChan)
-	deleteArns := <-printDone
-	if collectDeletes {
-		if len(deleteArns) == 0 {
 			return nil
-		}
-		confirm, err := confirmDelete(t.Prompter, t.Logger)
-		if err != nil {
+		},
+		Process: func(_ context.Context, tg elbtypes.TargetGroup) (*orphanTargetGroup, error) {
+			name := aws.ToString(tg.TargetGroupName)
+			if filterByName != "" && !strings.Contains(name, filterByName) {
+				return nil, nil
+			}
+			attachedCount := 0
+			if tg.LoadBalancerArns != nil {
+				attachedCount = len(tg.LoadBalancerArns)
+			}
+			if !includeAttached && attachedCount > 0 {
+				return nil, nil
+			}
+			arn := aws.ToString(tg.TargetGroupArn)
+			if arn == "" {
+				return nil, nil
+			}
+			vpcID := aws.ToString(tg.VpcId)
+			if vpcID == "" {
+				vpcID = "-"
+			}
+			proto := string(tg.Protocol)
+			if proto == "" {
+				proto = "-"
+			}
+			port := int32(0)
+			if tg.Port != nil {
+				port = *tg.Port
+			}
+			tgType := string(tg.TargetType)
+			if tgType == "" {
+				tgType = "-"
+			}
+			return &orphanTargetGroup{
+				name:       name,
+				arn:        arn,
+				targetType: tgType,
+				protocol:   proto,
+				vpcID:      vpcID,
+				port:       port,
+				attached:   attachedCount,
+			}, nil
+		},
+		ToRow: func(r orphanTargetGroup) []any {
+			return []any{r.name, r.arn, r.targetType, r.protocol, r.port, r.vpcID, r.attached}
+		},
+		Delete: func(ctx context.Context, r orphanTargetGroup) error {
+			if r.attached > 0 || r.arn == "" || r.arn == "-" {
+				return nil // skip — Process already filtered, belt-and-suspenders
+			}
+			t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": r.arn})
+			_, err := t.AWSClient.ELB.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{TargetGroupArn: aws.String(r.arn)})
 			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, arn := range deleteArns {
-			t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": arn})
-			if _, err := t.AWSClient.ELB.DeleteTargetGroup(rootCtx, &elasticloadbalancingv2.DeleteTargetGroupInput{
-				TargetGroupArn: aws.String(arn),
-			}); err != nil {
-				t.Logger.LogError("Error deleting target group", err, map[string]any{"TargetGroupArn": arn}, false)
-				return err
-			}
-		}
-	}
-
-	return nil
+		},
+	})
 }
 
 // Legacy pretty-table printer removed in favor of streaming output for low memory usage.
