@@ -25,12 +25,9 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/opensearch"
 	opensearchtypes "github.com/aws/aws-sdk-go-v2/service/opensearch/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 type orphanOpenSearchDomain struct {
@@ -82,129 +79,64 @@ func init() {
 }
 
 func (a *AWSCommand) executeOpenSearch(ctx context.Context, flagValues *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
 	daysNoIndexing := int64((*flagValues)["days-no-indexing"].(int))
 	hoursNoSearches := int64((*flagValues)["hours-no-searches"].(int))
 
-	domainNameChan := make(chan string, 50)
-	resultsChan := make(chan table.Row, 50)
-	orphanDomains := []orphanOpenSearchDomain{}
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to list all OpenSearch domain names
-	g.Go(func() error {
-		defer close(domainNameChan)
-		output, err := a.AWSClient.OpenSearch.ListDomainNames(egCtx, &opensearch.ListDomainNamesInput{})
-		if err != nil {
-			a.Logger.LogError("Error listing OpenSearch domains", err, nil, false)
-			return err
-		}
-		for _, domainInfo := range output.DomainNames {
-			select {
-			case domainNameChan <- aws.ToString(domainInfo.DomainName):
-			case <-egCtx.Done():
-				return egCtx.Err()
-			}
-		}
-		return nil
-	})
-
-	// Worker goroutines to check each domain
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return nil
-				case domainName, ok := <-domainNameChan:
-					if !ok {
-						return nil
-					}
-
-					// Get domain details
-					domainOutput, err := a.AWSClient.OpenSearch.DescribeDomain(egCtx, &opensearch.DescribeDomainInput{
-						DomainName: aws.String(domainName),
-					})
-					if err != nil {
-						a.Logger.LogError("Error describing OpenSearch domain", err, map[string]any{
-							"domain": domainName,
-						}, false)
-						continue
-					}
-
-					orphan, err := a.checkOpenSearchOrphan(egCtx, domainOutput.DomainStatus, daysNoIndexing, hoursNoSearches)
-					if err != nil {
-						a.Logger.LogError("Error checking OpenSearch domain", err, map[string]any{
-							"domain": domainName,
-						}, false)
-						continue
-					}
-
-					if orphan != nil {
-						select {
-						case resultsChan <- table.Row{
-							orphan.DomainName,
-							orphan.EngineVersion,
-							orphan.InstanceType,
-							orphan.InstanceCount,
-							fmt.Sprintf("%d GB", orphan.StorageSize),
-							orphan.Created,
-							fmt.Sprintf("%d days", orphan.DaysSinceActivity),
-							orphan.Reason,
-						}:
-						case <-egCtx.Done():
-							return egCtx.Err()
-						}
-						orphanDomains = append(orphanDomains, *orphan)
-					}
-				}
-			}
-		})
-	}
-
-	// Goroutine to collect results and print
-	headers := []string{"Domain Name", "Version", "Instance Type", "Instances", "Storage", "Created", "Days Since Activity", "Reason"}
-
-	t := printer.NewStreamTable(a.Output, false, headers)
-	defer t.Close()
-
-	go func() {
-		for row := range resultsChan {
-			t.WriteRow(row...)
-		}
-	}()
-
-	if err := g.Wait(); err != nil {
-		close(resultsChan)
-		return err
-	}
-	close(resultsChan)
-	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish writing
-
-	a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned OpenSearch domains", len(orphanDomains)), nil)
-
-	if collectDeletes && len(orphanDomains) > 0 {
-		confirm, err := confirmDelete(a.Prompter, a.Logger)
-		if err != nil || !confirm {
-			return err
-		}
-
-		a.Logger.LogInfo("Deleting orphaned OpenSearch domains...", nil)
-		for _, domain := range orphanDomains {
-			if err := a.deleteOpenSearchDomain(rootCtx, domain.DomainName); err != nil {
-				a.Logger.LogError("Failed to delete OpenSearch domain", err, map[string]any{
-					"domain": domain.DomainName,
-				}, false)
+	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanOpenSearchDomain]{
+		Headers:   []string{"Domain Name", "Version", "Instance Type", "Instances", "Storage", "Created", "Days Since Activity", "Reason"},
+		HideIndex: true,
+		List: func(ctx context.Context, emit func(string) error) error {
+			out, err := a.AWSClient.OpenSearch.ListDomainNames(ctx, &opensearch.ListDomainNamesInput{})
+			if err != nil {
 				return err
 			}
-			a.Logger.LogInfo(fmt.Sprintf("Deleted OpenSearch domain: %s", domain.DomainName), nil)
-		}
-	}
-
-	return nil
+			for _, d := range out.DomainNames {
+				if err := emit(aws.ToString(d.DomainName)); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Process: func(ctx context.Context, domainName string) (*orphanOpenSearchDomain, error) {
+			domainOutput, err := a.AWSClient.OpenSearch.DescribeDomain(ctx, &opensearch.DescribeDomainInput{
+				DomainName: aws.String(domainName),
+			})
+			if err != nil {
+				a.Logger.LogError("Error describing OpenSearch domain", err, map[string]any{
+					"domain": domainName,
+				}, false)
+				return nil, nil
+			}
+			orphan, err := a.checkOpenSearchOrphan(ctx, domainOutput.DomainStatus, daysNoIndexing, hoursNoSearches)
+			if err != nil {
+				a.Logger.LogError("Error checking OpenSearch domain", err, map[string]any{
+					"domain": domainName,
+				}, false)
+				return nil, nil
+			}
+			return orphan, nil
+		},
+		ToRow: func(r orphanOpenSearchDomain) []any {
+			return []any{
+				r.DomainName,
+				r.EngineVersion,
+				r.InstanceType,
+				r.InstanceCount,
+				fmt.Sprintf("%d GB", r.StorageSize),
+				r.Created,
+				fmt.Sprintf("%d days", r.DaysSinceActivity),
+				r.Reason,
+			}
+		},
+		Delete: func(ctx context.Context, r orphanOpenSearchDomain) error {
+			a.Logger.LogInfo("Deleting OpenSearch domain", map[string]any{"DomainName": r.DomainName})
+			if err := a.deleteOpenSearchDomain(ctx, r.DomainName); err != nil {
+				a.Logger.LogError("Failed to delete OpenSearch domain", err, map[string]any{"DomainName": r.DomainName}, false)
+				return err
+			}
+			return nil
+		},
+	})
 }
 
 func (a *AWSCommand) checkOpenSearchOrphan(ctx context.Context, domain *opensearchtypes.DomainStatus, daysNoIndexing, hoursNoSearches int64) (*orphanOpenSearchDomain, error) {

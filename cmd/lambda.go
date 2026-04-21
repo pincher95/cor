@@ -25,12 +25,9 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 type orphanLambdaFunction struct {
@@ -79,121 +76,59 @@ func init() {
 }
 
 func (a *AWSCommand) executeLambda(ctx context.Context, flagValues *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
 	daysSinceInvocation := int64((*flagValues)["days-since-invocation"].(int))
 	minOldVersions := int32((*flagValues)["min-old-versions"].(int))
 
-	functionChan := make(chan *lambdatypes.FunctionConfiguration, 50)
-	resultsChan := make(chan table.Row, 50)
-	orphanFunctions := []orphanLambdaFunction{}
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to list all Lambda functions
-	g.Go(func() error {
-		defer close(functionChan)
-		paginator := lambda.NewListFunctionsPaginator(a.AWSClient.Lambda, &lambda.ListFunctionsInput{})
-		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(egCtx)
+	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[lambdatypes.FunctionConfiguration, orphanLambdaFunction]{
+		Headers:   []string{"Function Name", "Runtime", "Memory", "Last Modified", "Days Since Invocation", "Versions", "Provisioned Concurrency", "Reason"},
+		HideIndex: true,
+		List: func(ctx context.Context, emit func(lambdatypes.FunctionConfiguration) error) error {
+			p := lambda.NewListFunctionsPaginator(a.AWSClient.Lambda, &lambda.ListFunctionsInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, fn := range page.Functions {
+					if err := emit(fn); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(ctx context.Context, fn lambdatypes.FunctionConfiguration) (*orphanLambdaFunction, error) {
+			orphan, err := a.checkLambdaOrphan(ctx, &fn, daysSinceInvocation, minOldVersions)
 			if err != nil {
-				a.Logger.LogError("Error listing Lambda functions", err, nil, false)
-				return err
-			}
-			for i := range page.Functions {
-				select {
-				case functionChan <- &page.Functions[i]:
-				case <-egCtx.Done():
-					return egCtx.Err()
-				}
-			}
-		}
-		return nil
-	})
-
-	// Worker goroutines to check each function
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return nil
-				case fn, ok := <-functionChan:
-					if !ok {
-						return nil
-					}
-
-					orphan, err := a.checkLambdaOrphan(egCtx, fn, daysSinceInvocation, minOldVersions)
-					if err != nil {
-						a.Logger.LogError("Error checking Lambda function", err, map[string]any{
-							"function": aws.ToString(fn.FunctionName),
-						}, false)
-						continue
-					}
-
-					if orphan != nil {
-						select {
-						case resultsChan <- table.Row{
-							orphan.Name,
-							orphan.Runtime,
-							fmt.Sprintf("%d MB", orphan.MemorySize),
-							orphan.LastModified,
-							fmt.Sprintf("%d days", orphan.LastInvocationDays),
-							orphan.Versions,
-							orphan.ProvisionedConcurrency,
-							orphan.Reason,
-						}:
-						case <-egCtx.Done():
-							return egCtx.Err()
-						}
-						orphanFunctions = append(orphanFunctions, *orphan)
-					}
-				}
-			}
-		})
-	}
-
-	// Goroutine to collect results and print
-	headers := []string{"Function Name", "Runtime", "Memory", "Last Modified", "Days Since Invocation", "Versions", "Provisioned Concurrency", "Reason"}
-
-	t := printer.NewStreamTable(a.Output, false, headers)
-	defer t.Close()
-
-	go func() {
-		for row := range resultsChan {
-			t.WriteRow(row...)
-		}
-	}()
-
-	if err := g.Wait(); err != nil {
-		close(resultsChan)
-		return err
-	}
-	close(resultsChan)
-	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish writing
-
-	a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned Lambda functions", len(orphanFunctions)), nil)
-
-	if collectDeletes && len(orphanFunctions) > 0 {
-		confirm, err := confirmDelete(a.Prompter, a.Logger)
-		if err != nil || !confirm {
-			return err
-		}
-
-		a.Logger.LogInfo("Deleting orphaned Lambda functions...", nil)
-		for _, fn := range orphanFunctions {
-			if err := a.deleteLambdaFunction(rootCtx, fn.Name); err != nil {
-				a.Logger.LogError("Failed to delete Lambda function", err, map[string]any{
-					"function": fn.Name,
+				a.Logger.LogError("Error checking Lambda function", err, map[string]any{
+					"function": aws.ToString(fn.FunctionName),
 				}, false)
+				return nil, nil
+			}
+			return orphan, nil
+		},
+		ToRow: func(r orphanLambdaFunction) []any {
+			return []any{
+				r.Name,
+				r.Runtime,
+				fmt.Sprintf("%d MB", r.MemorySize),
+				r.LastModified,
+				fmt.Sprintf("%d days", r.LastInvocationDays),
+				r.Versions,
+				r.ProvisionedConcurrency,
+				r.Reason,
+			}
+		},
+		Delete: func(ctx context.Context, r orphanLambdaFunction) error {
+			a.Logger.LogInfo("Deleting Lambda function", map[string]any{"function": r.Name})
+			if err := a.deleteLambdaFunction(ctx, r.Name); err != nil {
+				a.Logger.LogError("Failed to delete Lambda function", err, map[string]any{"function": r.Name}, false)
 				return err
 			}
-			a.Logger.LogInfo(fmt.Sprintf("Deleted Lambda function: %s", fn.Name), nil)
-		}
-	}
-
-	return nil
+			a.Logger.LogInfo(fmt.Sprintf("Deleted Lambda function: %s", r.Name), nil)
+			return nil
+		},
+	})
 }
 
 func (a *AWSCommand) checkLambdaOrphan(ctx context.Context, fn *lambdatypes.FunctionConfiguration, daysSinceInvocation int64, minOldVersions int32) (*orphanLambdaFunction, error) {

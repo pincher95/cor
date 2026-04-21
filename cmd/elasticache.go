@@ -25,12 +25,9 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
 	elasticachetypes "github.com/aws/aws-sdk-go-v2/service/elasticache/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 type orphanElastiCacheCluster struct {
@@ -77,120 +74,57 @@ func init() {
 }
 
 func (a *AWSCommand) executeElastiCache(ctx context.Context, flagValues *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
 	hoursZeroConnections := int64((*flagValues)["hours-zero-connections"].(int))
 
-	clusterChan := make(chan *elasticachetypes.CacheCluster, 50)
-	resultsChan := make(chan table.Row, 50)
-	orphanClusters := []orphanElastiCacheCluster{}
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to list all ElastiCache clusters
-	g.Go(func() error {
-		defer close(clusterChan)
-		paginator := elasticache.NewDescribeCacheClustersPaginator(a.AWSClient.ElastiCache, &elasticache.DescribeCacheClustersInput{})
-		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(egCtx)
+	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[elasticachetypes.CacheCluster, orphanElastiCacheCluster]{
+		Headers:   []string{"Cluster ID", "Engine", "Node Type", "Nodes", "Status", "Created", "Days Since Activity", "Reason"},
+		HideIndex: true,
+		List: func(ctx context.Context, emit func(elasticachetypes.CacheCluster) error) error {
+			p := elasticache.NewDescribeCacheClustersPaginator(a.AWSClient.ElastiCache, &elasticache.DescribeCacheClustersInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, c := range page.CacheClusters {
+					if err := emit(c); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(ctx context.Context, c elasticachetypes.CacheCluster) (*orphanElastiCacheCluster, error) {
+			orphan, err := a.checkElastiCacheOrphan(ctx, &c, hoursZeroConnections)
 			if err != nil {
-				a.Logger.LogError("Error listing ElastiCache clusters", err, nil, false)
-				return err
-			}
-			for i := range page.CacheClusters {
-				select {
-				case clusterChan <- &page.CacheClusters[i]:
-				case <-egCtx.Done():
-					return egCtx.Err()
-				}
-			}
-		}
-		return nil
-	})
-
-	// Worker goroutines to check each cluster
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return nil
-				case cluster, ok := <-clusterChan:
-					if !ok {
-						return nil
-					}
-
-					orphan, err := a.checkElastiCacheOrphan(egCtx, cluster, hoursZeroConnections)
-					if err != nil {
-						a.Logger.LogError("Error checking ElastiCache cluster", err, map[string]any{
-							"cluster": aws.ToString(cluster.CacheClusterId),
-						}, false)
-						continue
-					}
-
-					if orphan != nil {
-						select {
-						case resultsChan <- table.Row{
-							orphan.ClusterID,
-							orphan.Engine,
-							orphan.CacheNodeType,
-							orphan.NumNodes,
-							orphan.Status,
-							orphan.CreatedDate,
-							fmt.Sprintf("%d days", orphan.DaysSinceActivity),
-							orphan.Reason,
-						}:
-						case <-egCtx.Done():
-							return egCtx.Err()
-						}
-						orphanClusters = append(orphanClusters, *orphan)
-					}
-				}
-			}
-		})
-	}
-
-	// Goroutine to collect results and print
-	headers := []string{"Cluster ID", "Engine", "Node Type", "Nodes", "Status", "Created", "Days Since Activity", "Reason"}
-
-	t := printer.NewStreamTable(a.Output, false, headers)
-	defer t.Close()
-
-	go func() {
-		for row := range resultsChan {
-			t.WriteRow(row...)
-		}
-	}()
-
-	if err := g.Wait(); err != nil {
-		close(resultsChan)
-		return err
-	}
-	close(resultsChan)
-	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish writing
-
-	a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned ElastiCache clusters", len(orphanClusters)), nil)
-
-	if collectDeletes && len(orphanClusters) > 0 {
-		confirm, err := confirmDelete(a.Prompter, a.Logger)
-		if err != nil || !confirm {
-			return err
-		}
-
-		a.Logger.LogInfo("Deleting orphaned ElastiCache clusters...", nil)
-		for _, cluster := range orphanClusters {
-			if err := a.deleteElastiCacheCluster(rootCtx, cluster.ClusterID); err != nil {
-				a.Logger.LogError("Failed to delete ElastiCache cluster", err, map[string]any{
-					"cluster": cluster.ClusterID,
+				a.Logger.LogError("Error checking ElastiCache cluster", err, map[string]any{
+					"cluster": aws.ToString(c.CacheClusterId),
 				}, false)
+				return nil, nil
+			}
+			return orphan, nil
+		},
+		ToRow: func(r orphanElastiCacheCluster) []any {
+			return []any{
+				r.ClusterID,
+				r.Engine,
+				r.CacheNodeType,
+				r.NumNodes,
+				r.Status,
+				r.CreatedDate,
+				fmt.Sprintf("%d days", r.DaysSinceActivity),
+				r.Reason,
+			}
+		},
+		Delete: func(ctx context.Context, r orphanElastiCacheCluster) error {
+			a.Logger.LogInfo("Deleting ElastiCache cluster", map[string]any{"ClusterId": r.ClusterID})
+			if err := a.deleteElastiCacheCluster(ctx, r.ClusterID); err != nil {
+				a.Logger.LogError("Failed to delete ElastiCache cluster", err, map[string]any{"ClusterId": r.ClusterID}, false)
 				return err
 			}
-			a.Logger.LogInfo(fmt.Sprintf("Deleted ElastiCache cluster: %s", cluster.ClusterID), nil)
-		}
-	}
-
-	return nil
+			return nil
+		},
+	})
 }
 
 func (a *AWSCommand) checkElastiCacheOrphan(ctx context.Context, cluster *elasticachetypes.CacheCluster, hoursZeroConnections int64) (*orphanElastiCacheCluster, error) {

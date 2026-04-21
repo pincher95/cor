@@ -25,12 +25,9 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 type orphanDynamoDBTable struct {
@@ -78,121 +75,58 @@ func init() {
 }
 
 func (a *AWSCommand) executeDynamoDB(ctx context.Context, flagValues *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
 	daysNoActivity := int64((*flagValues)["days-no-activity"].(int))
 
-	tableNameChan := make(chan string, 50)
-	resultsChan := make(chan table.Row, 50)
-	orphanTables := []orphanDynamoDBTable{}
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to list all DynamoDB tables
-	g.Go(func() error {
-		defer close(tableNameChan)
-		paginator := dynamodb.NewListTablesPaginator(a.AWSClient.DynamoDB, &dynamodb.ListTablesInput{})
-		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(egCtx)
+	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanDynamoDBTable]{
+		Headers:   []string{"Table Name", "Billing Mode", "Status", "Items", "Size", "Read Capacity", "Write Capacity", "Days No Activity", "Reason"},
+		HideIndex: true,
+		List: func(ctx context.Context, emit func(string) error) error {
+			p := dynamodb.NewListTablesPaginator(a.AWSClient.DynamoDB, &dynamodb.ListTablesInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, name := range page.TableNames {
+					if err := emit(name); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(ctx context.Context, tableName string) (*orphanDynamoDBTable, error) {
+			orphan, err := a.checkDynamoDBOrphan(ctx, tableName, daysNoActivity)
 			if err != nil {
-				a.Logger.LogError("Error listing DynamoDB tables", err, nil, false)
-				return err
-			}
-			for _, tableName := range page.TableNames {
-				select {
-				case tableNameChan <- tableName:
-				case <-egCtx.Done():
-					return egCtx.Err()
-				}
-			}
-		}
-		return nil
-	})
-
-	// Worker goroutines to check each table
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return nil
-				case tableName, ok := <-tableNameChan:
-					if !ok {
-						return nil
-					}
-
-					orphan, err := a.checkDynamoDBOrphan(egCtx, tableName, daysNoActivity)
-					if err != nil {
-						a.Logger.LogError("Error checking DynamoDB table", err, map[string]any{
-							"table": tableName,
-						}, false)
-						continue
-					}
-
-					if orphan != nil {
-						select {
-						case resultsChan <- table.Row{
-							orphan.TableName,
-							orphan.BillingMode,
-							orphan.TableStatus,
-							orphan.ItemCount,
-							fmt.Sprintf("%.2f GB", float64(orphan.TableSize)/(1024*1024*1024)),
-							orphan.ReadCapacity,
-							orphan.WriteCapacity,
-							fmt.Sprintf("%d days", orphan.DaysSinceActivity),
-							orphan.Reason,
-						}:
-						case <-egCtx.Done():
-							return egCtx.Err()
-						}
-						orphanTables = append(orphanTables, *orphan)
-					}
-				}
-			}
-		})
-	}
-
-	// Goroutine to collect results and print
-	headers := []string{"Table Name", "Billing Mode", "Status", "Items", "Size", "Read Capacity", "Write Capacity", "Days No Activity", "Reason"}
-
-	t := printer.NewStreamTable(a.Output, false, headers)
-	defer t.Close()
-
-	go func() {
-		for row := range resultsChan {
-			t.WriteRow(row...)
-		}
-	}()
-
-	if err := g.Wait(); err != nil {
-		close(resultsChan)
-		return err
-	}
-	close(resultsChan)
-	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish writing
-
-	a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned DynamoDB tables", len(orphanTables)), nil)
-
-	if collectDeletes && len(orphanTables) > 0 {
-		confirm, err := confirmDelete(a.Prompter, a.Logger)
-		if err != nil || !confirm {
-			return err
-		}
-
-		a.Logger.LogInfo("Deleting orphaned DynamoDB tables...", nil)
-		for _, tbl := range orphanTables {
-			if err := a.deleteDynamoDBTable(rootCtx, tbl.TableName); err != nil {
-				a.Logger.LogError("Failed to delete DynamoDB table", err, map[string]any{
-					"table": tbl.TableName,
+				a.Logger.LogError("Error checking DynamoDB table", err, map[string]any{
+					"table": tableName,
 				}, false)
+				return nil, nil
+			}
+			return orphan, nil
+		},
+		ToRow: func(r orphanDynamoDBTable) []any {
+			return []any{
+				r.TableName,
+				r.BillingMode,
+				r.TableStatus,
+				r.ItemCount,
+				fmt.Sprintf("%.2f GB", float64(r.TableSize)/(1024*1024*1024)),
+				r.ReadCapacity,
+				r.WriteCapacity,
+				fmt.Sprintf("%d days", r.DaysSinceActivity),
+				r.Reason,
+			}
+		},
+		Delete: func(ctx context.Context, r orphanDynamoDBTable) error {
+			a.Logger.LogInfo("Deleting DynamoDB table", map[string]any{"TableName": r.TableName})
+			if err := a.deleteDynamoDBTable(ctx, r.TableName); err != nil {
+				a.Logger.LogError("Failed to delete DynamoDB table", err, map[string]any{"TableName": r.TableName}, false)
 				return err
 			}
-			a.Logger.LogInfo(fmt.Sprintf("Deleted DynamoDB table: %s", tbl.TableName), nil)
-		}
-	}
-
-	return nil
+			return nil
+		},
+	})
 }
 
 func (a *AWSCommand) checkDynamoDBOrphan(ctx context.Context, tableName string, daysNoActivity int64) (*orphanDynamoDBTable, error) {
