@@ -18,17 +18,13 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 type orphanS3Bucket struct {
@@ -74,141 +70,69 @@ func init() {
 }
 
 func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
 	checkLifecycle := (*flagValues)["check-lifecycle"].(bool)
 
-	bucketChan := make(chan s3types.Bucket, 50)
-	resultsChan := make(chan table.Row, 50)
-	orphanBuckets := []orphanS3Bucket{}
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to list all S3 buckets
-	g.Go(func() error {
-		defer close(bucketChan)
-		output, err := a.AWSClient.S3.ListBuckets(egCtx, &s3.ListBucketsInput{})
-		if err != nil {
-			a.Logger.LogError("Error listing S3 buckets", err, nil, false)
-			return err
-		}
-		for _, bucket := range output.Buckets {
-			select {
-			case bucketChan <- bucket:
-			case <-egCtx.Done():
-				return egCtx.Err()
+	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[s3types.Bucket, orphanS3Bucket]{
+		Headers:   []string{"Bucket Name", "Region", "Created", "Empty", "Incomplete Uploads", "Has Lifecycle", "Reason"},
+		HideIndex: true,
+		List: func(ctx context.Context, emit func(s3types.Bucket) error) error {
+			out, err := a.AWSClient.S3.ListBuckets(ctx, &s3.ListBucketsInput{})
+			if err != nil {
+				return err
 			}
-		}
-		return nil
+			for _, b := range out.Buckets {
+				if err := emit(b); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Process: func(ctx context.Context, b s3types.Bucket) (*orphanS3Bucket, error) {
+			orphan, err := a.checkS3BucketOrphan(ctx, b, checkLifecycle)
+			if err != nil {
+				a.Logger.LogError("Error checking S3 bucket", err, map[string]any{
+					"bucket": aws.ToString(b.Name),
+				}, false)
+				return nil, nil
+			}
+			return orphan, nil
+		},
+		ToRow: func(r orphanS3Bucket) []any {
+			yesNo := func(b bool) string {
+				if b {
+					return "Yes"
+				}
+				return "No"
+			}
+			return []any{
+				r.BucketName,
+				r.Region,
+				r.CreationDate,
+				yesNo(r.IsEmpty),
+				r.IncompleteUploads,
+				yesNo(r.HasLifecyclePolicy),
+				r.Reason,
+			}
+		},
+		Delete: func(ctx context.Context, r orphanS3Bucket) error {
+			if r.IncompleteUploads > 0 {
+				if err := a.abortMultipartUploads(ctx, r.BucketName, r.Region); err != nil {
+					a.Logger.LogError("Failed to abort multipart uploads", err, map[string]any{"bucket": r.BucketName}, false)
+					return err
+				}
+			}
+			if !r.IsEmpty {
+				a.Logger.LogInfo("Skipped non-empty S3 bucket", map[string]any{"bucket": r.BucketName})
+				return nil
+			}
+			a.Logger.LogInfo("Deleting S3 bucket", map[string]any{"bucket": r.BucketName})
+			if err := a.deleteS3Bucket(ctx, r.BucketName, r.Region); err != nil {
+				a.Logger.LogError("Failed to delete S3 bucket", err, map[string]any{"bucket": r.BucketName}, false)
+				return err
+			}
+			return nil
+		},
 	})
-
-	// Worker goroutines to check each bucket
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return nil
-				case bucket, ok := <-bucketChan:
-					if !ok {
-						return nil
-					}
-
-					orphan, err := a.checkS3BucketOrphan(egCtx, bucket, checkLifecycle)
-					if err != nil {
-						a.Logger.LogError("Error checking S3 bucket", err, map[string]any{
-							"bucket": aws.ToString(bucket.Name),
-						}, false)
-						continue
-					}
-
-					if orphan != nil {
-						emptyStatus := "No"
-						if orphan.IsEmpty {
-							emptyStatus = "Yes"
-						}
-						lifecycleStatus := "No"
-						if orphan.HasLifecyclePolicy {
-							lifecycleStatus = "Yes"
-						}
-
-						select {
-						case resultsChan <- table.Row{
-							orphan.BucketName,
-							orphan.Region,
-							orphan.CreationDate,
-							emptyStatus,
-							orphan.IncompleteUploads,
-							lifecycleStatus,
-							orphan.Reason,
-						}:
-						case <-egCtx.Done():
-							return egCtx.Err()
-						}
-						orphanBuckets = append(orphanBuckets, *orphan)
-					}
-				}
-			}
-		})
-	}
-
-	// Goroutine to collect results and print
-	headers := []string{"Bucket Name", "Region", "Created", "Empty", "Incomplete Uploads", "Has Lifecycle", "Reason"}
-
-	t := printer.NewStreamTable(a.Output, false, headers)
-	defer t.Close()
-
-	go func() {
-		for row := range resultsChan {
-			t.WriteRow(row...)
-		}
-	}()
-
-	if err := g.Wait(); err != nil {
-		close(resultsChan)
-		return err
-	}
-	close(resultsChan)
-	time.Sleep(100 * time.Millisecond) // Give goroutine time to finish writing
-
-	a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned S3 buckets", len(orphanBuckets)), nil)
-
-	if collectDeletes && len(orphanBuckets) > 0 {
-		a.Logger.LogInfo("WARNING: S3 bucket deletion requires buckets to be empty. Aborting multipart uploads first...", nil)
-
-		confirm, err := confirmDelete(a.Prompter, a.Logger)
-		if err != nil || !confirm {
-			return err
-		}
-
-		for _, bucket := range orphanBuckets {
-			// First, abort incomplete multipart uploads
-			if bucket.IncompleteUploads > 0 {
-				if err := a.abortMultipartUploads(rootCtx, bucket.BucketName, bucket.Region); err != nil {
-					a.Logger.LogError("Failed to abort multipart uploads", err, map[string]any{
-						"bucket": bucket.BucketName,
-					}, false)
-					continue
-				}
-			}
-
-			// Only delete if bucket is empty
-			if bucket.IsEmpty {
-				if err := a.deleteS3Bucket(rootCtx, bucket.BucketName, bucket.Region); err != nil {
-					a.Logger.LogError("Failed to delete S3 bucket", err, map[string]any{
-						"bucket": bucket.BucketName,
-					}, false)
-					continue
-				}
-				a.Logger.LogInfo(fmt.Sprintf("Deleted S3 bucket: %s", bucket.BucketName), nil)
-			} else {
-				a.Logger.LogInfo(fmt.Sprintf("Skipped non-empty bucket: %s", bucket.BucketName), nil)
-			}
-		}
-	}
-
-	return nil
 }
 
 func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Bucket, checkLifecycle bool) (*orphanS3Bucket, error) {
