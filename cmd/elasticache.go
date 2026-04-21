@@ -18,8 +18,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,9 +28,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -62,57 +58,22 @@ Orphaned ElastiCache clusters can incur significant costs:
 - cache.r6g.xlarge: ~$217/month
 - Extended support charges (80% premium) may apply for older engine versions`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-		logger := logging.NewLogger()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "hours-zero-connections", Type: "int"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			logger.LogError("Error getting flags", err, nil, true)
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
-			return err
-		}
-
-		elasticacheClient := elasticache.NewFromConfig(*cfg)
-		cwClient := cloudwatch.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{}
-		awsClient.ElastiCache = elasticacheClient
-		awsClient.CloudWatch = cwClient
-
-		return runElastiCacheCmd(ctx, &prompterClient, output, awsClient, flagValues, logger)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "hours-zero-connections", Type: "int"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{
+					ElastiCache: elasticache.NewFromConfig(*cfg),
+					CloudWatch:  cloudwatch.NewFromConfig(*cfg),
+				}
+			},
+		}, (*AWSCommand).executeElastiCache)
 	},
 }
 
 func init() {
 	elasticacheCmd.Flags().Int("hours-zero-connections", 24, "Consider clusters orphaned if zero connections for this many hours")
-}
-
-func runElastiCacheCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any, logger *logging.Logger) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logger,
-		Prompter:  *prompter,
-		Output:    output,
-	}
-
-	return command.executeElastiCache(ctx, flagValues)
 }
 
 func (a *AWSCommand) executeElastiCache(ctx context.Context, flagValues *map[string]any) error {

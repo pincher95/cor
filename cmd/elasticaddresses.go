@@ -17,8 +17,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -26,9 +24,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -45,69 +41,19 @@ var elasticIPsCmd = &cobra.Command{
 	Short: "List and optionally release unassociated Elastic IPs",
 	Long:  `List Elastic IP addresses that are not associated to any instance/network interface and optionally release them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Create prompter using the prompter package
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-
-		// Create a context
-		ctx := cmd.Context()
-
-		// Create a new logger and error handler
-		logger := logging.NewLogger()
-
-		// Get the flags from the command and also the additional flags specific to this command
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		// Specify additional flags that are specific to this command
-		additionalFlags := []flags.Flag{
-			{
-				Name: "filter-by-name",
-				Type: "string",
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
 			},
-		}
-		// Get the flags
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			logger.LogError("Error getting flags", err, nil, true)
-			return err
-		}
-
-		// Create AWS client configuration
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
-			return err
-		}
-
-		// Create a new EC2 client
-		ec2Client := ec2.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{
-			EC2: ec2Client,
-		}
-
-		return runElasticIPsCmd(ctx, &prompterClient, output, awsClient, flagValues)
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeElasticIPs)
 	},
 }
 
 func init() {
 	elasticIPsCmd.Flags().String("filter-by-name", "", "Filter Elastic IPs by tag:Name (empty = no filter).")
-}
-
-func runElasticIPsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	// Create an instance of elbv2Command
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  *prompter,
-		Output:    output,
-	}
-
-	return command.executeElasticIPs(ctx, flagValues)
 }
 
 func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[string]any) error {
