@@ -50,7 +50,19 @@
       "Bash(grep -vE \"^[+\\\\-]\\\\s*$\")",
       "Bash(awk '{print length\\($0\\), $0}')",
       "Bash(awk 'NR==FNR{print length\\($0\\), $0}')",
-      "Bash(grep -v \":0$\")"
+      "Bash(grep -v \":0$\")",
+      "Bash(go version *)",
+      "Bash(mkdir -p /tmp/go-gentest)",
+      "Bash(cat)",
+      "Bash(/bin/rm /tmp/go-gentest/main.go)",
+      "Bash(rmdir /tmp/go-gentest)",
+      "Bash(awk '{ if \\(length\\($0\\) > 100\\) print NR\": \"length\\($0\\)\": \"$0 }')",
+      "Bash(awk '/totalSize \\\\+= res.size/,/stream.WriteRow.*Total/')",
+      "Bash(awk '{ if \\(length\\($0\\) > 100\\) print NR\": \"length\\($0\\)\" chars: \"$0 }')",
+      "Bash(go doc *)",
+      "Bash(awk '/^[-+]$/{next} /^[-+]{3}/{next} /func init\\\\\\(\\\\\\)/,/^[-+]\\\\s*}\\\\s*$/')",
+      "Bash(grep -nA 10 \"for _, func\")",
+      "Bash(grep -nA 10 \"for _, cluster\\\\|for _, cl \")"
     ]
   }
 }
