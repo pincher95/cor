@@ -21,18 +21,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
-type addressWithTags struct {
-	Address types.Address
-	TagMap  map[string]types.Tag
+type orphanElasticIP struct {
+	name, allocationID, publicIP, associationID, networkInterfaceID string
 }
 
 // elasticaddressesCmd represents the elasticaddresses command
@@ -57,201 +53,76 @@ func init() {
 }
 
 func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[string]any) error {
-	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
-	rootCtx := ctx
-
-	collectDeletes := (*flagValues)["delete"].(bool)
-
-	// Create a channel to process addresses
-	addressChan := make(chan addressWithTags, 10)
-	resultsChan := make(chan table.Row, 10)
-
-	// Create an errgroup with context
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to describe addresses
 	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	g.Go(func() error {
-		elasticIPFilter := []types.Filter{}
-		if filterByName != "" {
-			elasticIPFilter = append(elasticIPFilter, types.Filter{
-				Name:   aws.String("tag:Name"),
-				Values: []string{filterByName},
-			})
-		}
-		if err := a.describeAddresses(egCtx, addressChan, &elasticIPFilter); err != nil {
-			return err
-		}
-		return nil
-	})
 
-	// Launch worker goroutines
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return nil
-				case addressWithTags, ok := <-addressChan:
-					if !ok {
-						return nil
-					}
-					// processAddressWithTags, err := handleElasticIP(addressWithTags)
-					// if err != nil {
-					// 	return err
-					// }
-
-					address := addressWithTags.Address
-
-					if address.AssociationId == nil {
-						if address.InstanceId == nil {
-							// Safely dereference pointers with nil checks
-							name := "-"
-							if nameTag, ok := utils.TagsToMap(address.Tags)["Name"]; ok && nameTag.Value != nil {
-								name = *nameTag.Value
-							}
-
-							associationId := "-"
-							if address.AssociationId != nil {
-								associationId = *address.AssociationId
-							}
-
-							elasticIP := "-"
-							if address.PublicIp != nil {
-								elasticIP = *address.PublicIp
-							}
-
-							allocationId := "-"
-							if address.AllocationId != nil {
-								allocationId = *address.AllocationId
-							}
-
-							networkInterfaceId := "-"
-							if address.NetworkInterfaceId != nil {
-								networkInterfaceId = *address.NetworkInterfaceId
-							}
-							// Send the row to the results channel
-							resultsChan <- table.Row{name, allocationId, elasticIP, associationId, networkInterfaceId}
-						}
-					}
-				}
+	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[types.Address, orphanElasticIP]{
+		Headers: []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"},
+		List: func(ctx context.Context, emit func(types.Address) error) error {
+			filters := []types.Filter{}
+			if filterByName != "" {
+				filters = append(filters, types.Filter{
+					Name:   aws.String("tag:Name"),
+					Values: []string{filterByName},
+				})
 			}
-		})
-	}
-
-	// Printer goroutine: stream output as rows arrive.
-	resultDone := make(chan []ec2.ReleaseAddressInput, 1)
-	go func() {
-		stream := printer.NewStreamTable(a.Output, true, []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"})
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-
-		deleteInputs := make([]ec2.ReleaseAddressInput, 0)
-		for row := range resultsChan {
-			stream.WriteRow(row...)
-
-			if collectDeletes {
-				// Expect: Name, AllocationID, PublicIP, AssociationID, NetworkInterfaceID
-				if len(row) < 3 {
-					continue
-				}
-
-				allocationID, _ := row[1].(string)
-				publicIP, _ := row[2].(string)
-
-				// Prefer AllocationId (VPC EIPs), fall back to PublicIp (EC2-Classic).
-				input := ec2.ReleaseAddressInput{}
-				if allocationID != "" && allocationID != "-" {
-					input.AllocationId = aws.String(allocationID)
-				} else if publicIP != "" && publicIP != "-" {
-					input.PublicIp = aws.String(publicIP)
-				} else {
-					continue
-				}
-				deleteInputs = append(deleteInputs, input)
-			}
-		}
-		stream.Close()
-		resultDone <- deleteInputs
-	}()
-
-	// Wait for the describer and workers to finish.
-	err := g.Wait()
-
-	// All worker and describer goroutines are done; close the results channel.
-	close(resultsChan)
-	deleteInputs := <-resultDone
-	if err != nil {
-		a.Logger.LogError("Error during elastic IP processing", err, nil, false)
-		return err
-	}
-	if collectDeletes {
-		if len(deleteInputs) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(a.Prompter, a.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, input := range deleteInputs {
-			allocationID := aws.ToString(input.AllocationId)
-			publicIP := aws.ToString(input.PublicIp)
-			a.Logger.LogInfo("Releasing Elastic IP", map[string]any{"AllocationId": allocationID, "PublicIp": publicIP})
-			if _, err := a.AWSClient.EC2.ReleaseAddress(rootCtx, &input); err != nil {
-				a.Logger.LogError("Error releasing Elastic IP", err, map[string]any{"AllocationId": allocationID, "PublicIp": publicIP}, false)
+			out, err := a.AWSClient.EC2.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: filters})
+			if err != nil {
 				return err
 			}
-		}
-	}
-
-	return nil
-}
-
-func (a *AWSCommand) describeAddresses(ctx context.Context, addressChan chan<- addressWithTags, filters *[]types.Filter) error {
-	defer func() {
-		if recover() != nil {
-			// Prevent panic if the channel is already closed
-			a.Logger.LogError("Channel `addressChan` closed", nil, nil, false)
-		}
-		close(addressChan)
-	}()
-
-	// If filters are nil, create an empty filter
-	if filters == nil {
-		filters = &[]types.Filter{}
-	}
-
-	// Describe the addresses
-	output, err := a.AWSClient.EC2.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{
-		Filters: *filters,
+			for _, addr := range out.Addresses {
+				if err := emit(addr); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, addr types.Address) (*orphanElasticIP, error) {
+			// Orphan only if neither associated nor attached to an instance.
+			if addr.AssociationId != nil || addr.InstanceId != nil {
+				return nil, nil
+			}
+			name := "-"
+			if nameTag, ok := utils.TagsToMap(addr.Tags)["Name"]; ok && nameTag.Value != nil {
+				name = *nameTag.Value
+			}
+			return &orphanElasticIP{
+				name:               name,
+				allocationID:       stringOrDash(addr.AllocationId),
+				publicIP:           stringOrDash(addr.PublicIp),
+				associationID:      stringOrDash(addr.AssociationId),
+				networkInterfaceID: stringOrDash(addr.NetworkInterfaceId),
+			}, nil
+		},
+		ToRow: func(r orphanElasticIP) []any {
+			return []any{r.name, r.allocationID, r.publicIP, r.associationID, r.networkInterfaceID}
+		},
+		Delete: func(ctx context.Context, r orphanElasticIP) error {
+			input := ec2.ReleaseAddressInput{}
+			if r.allocationID != "" && r.allocationID != "-" {
+				input.AllocationId = aws.String(r.allocationID)
+			} else if r.publicIP != "" && r.publicIP != "-" {
+				input.PublicIp = aws.String(r.publicIP)
+			} else {
+				return nil // nothing to release
+			}
+			a.Logger.LogInfo("Releasing Elastic IP", map[string]any{
+				"AllocationId": aws.ToString(input.AllocationId),
+				"PublicIp":     aws.ToString(input.PublicIp),
+			})
+			_, err := a.AWSClient.EC2.ReleaseAddress(ctx, &input)
+			return err
+		},
 	})
-	if err != nil {
-		return err
-	}
-
-	// Send volumes to the channel
-	for _, address := range output.Addresses {
-		tagMap := utils.TagsToMap(address.Tags)
-		addressChan <- addressWithTags{Address: address, TagMap: tagMap}
-	}
-
-	return nil
 }
 
-// func handleElasticIP(address addressWithTags) (*addressWithTags, error) {
-// 	_, ok := address.TagMap["Name"]
-// 	if !ok {
-// 		address.TagMap["Name"] = types.Tag{
-// 			Value: aws.String("-"),
-// 		}
-// 	}
-// 	return &addressWithTags{
-// 		Address: address.Address,
-// 		TagMap:  address.TagMap,
-// 	}, nil
-// }
-
-// Legacy pretty-table printer removed in favor of streaming output for low memory usage.
+// stringOrDash returns the dereferenced value of p, or "-" if p is nil or empty.
+func stringOrDash(p *string) string {
+	if p == nil {
+		return "-"
+	}
+	s := *p
+	if s == "" {
+		return "-"
+	}
+	return s
+}

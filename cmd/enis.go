@@ -24,14 +24,32 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
+
+type orphanENI struct {
+	name             string
+	id               string
+	interfaceType    string
+	status           string
+	requesterManaged bool
+	description      string
+	vpcDisplay       string
+	subnetDisplay    string
+	privateIP        string
+	securityGroups   string
+}
+
+// eniNameCache memoizes VPC / subnet / security-group Name lookups across
+// the ENI workers so repeated Describe* round-trips are avoided.
+type eniNameCache struct {
+	mu      sync.RWMutex
+	vpcs    map[string]string
+	subnets map[string]string
+	sgs     map[string]string
+}
 
 // enisCmd represents the enis command
 var enisCmd = &cobra.Command{
@@ -103,422 +121,369 @@ func init() {
 }
 
 func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any) error {
-	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
-	rootCtx := ctx
-
-	collectDeletes := (*flagValues)["delete"].(bool)
-
-	type nameCache struct {
-		mu      sync.RWMutex
-		vpcs    map[string]string
-		subnets map[string]string
-		sgs     map[string]string
-	}
-	cache := &nameCache{
+	cache := &eniNameCache{
 		vpcs:    make(map[string]string),
 		subnets: make(map[string]string),
 		sgs:     make(map[string]string),
 	}
 
-	findNameTag := func(tags []types.Tag) string {
-		for _, t := range tags {
-			if aws.ToString(t.Key) == "Name" && t.Value != nil && aws.ToString(t.Value) != "" {
-				return aws.ToString(t.Value)
-			}
-		}
-		return "-"
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	filterByENIs := mergeCSV(flagValues, "filter-by-enis", "filter-by-id-or-name")
+	filterByVPC := mergeCSV(flagValues, "filter-by-vpc", "filter-by-vpc-id")
+	filterBySubnet := mergeCSV(flagValues, "filter-by-subnet", "filter-by-subnet-id")
+	filterBySG := mergeCSV(flagValues, "filter-by-sg", "filter-by-security-group-id")
+	filterByType := mergeCSV(flagValues, "filter-by-type", "filter-by-interface-type")
+	filterByIP := mergeCSV(flagValues, "filter-by-ip", "filter-by-private-ip")
+	filterByDesc := normalizeFilterValue(getFlagString(flagValues, "filter-by-desc"))
+	if filterByDesc == "" {
+		filterByDesc = normalizeFilterValue(getFlagString(flagValues, "filter-by-description"))
 	}
 
-	formatIDAndName := func(id string, name string) string {
-		if id == "" || id == "-" {
-			return "-"
-		}
-		if name == "" || name == "-" {
-			return id
-		}
-		return fmt.Sprintf("%s (%s)", id, name)
-	}
-
-	getVPCName := func(ctx context.Context, vpcID string) string {
-		if vpcID == "" || vpcID == "-" {
-			return "-"
-		}
-		cache.mu.RLock()
-		if n, ok := cache.vpcs[vpcID]; ok {
-			cache.mu.RUnlock()
-			return n
-		}
-		cache.mu.RUnlock()
-
-		out := "-"
-		resp, err := e.AWSClient.EC2.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{VpcIds: []string{vpcID}})
-		if err == nil && len(resp.Vpcs) > 0 {
-			out = findNameTag(resp.Vpcs[0].Tags)
-		}
-
-		cache.mu.Lock()
-		cache.vpcs[vpcID] = out
-		cache.mu.Unlock()
-		return out
-	}
-
-	getSubnetName := func(ctx context.Context, subnetID string) string {
-		if subnetID == "" || subnetID == "-" {
-			return "-"
-		}
-		cache.mu.RLock()
-		if n, ok := cache.subnets[subnetID]; ok {
-			cache.mu.RUnlock()
-			return n
-		}
-		cache.mu.RUnlock()
-
-		out := "-"
-		resp, err := e.AWSClient.EC2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{subnetID}})
-		if err == nil && len(resp.Subnets) > 0 {
-			out = findNameTag(resp.Subnets[0].Tags)
-		}
-
-		cache.mu.Lock()
-		cache.subnets[subnetID] = out
-		cache.mu.Unlock()
-		return out
-	}
-
-	ensureSGNames := func(ctx context.Context, sgIDs []string) {
-		missing := make([]string, 0)
-		cache.mu.RLock()
-		for _, id := range sgIDs {
-			if id == "" || id == "-" {
-				continue
+	return runOrphanPipeline(e, ctx, flagValues, OrphanPipeline[types.NetworkInterface, orphanENI]{
+		Headers: []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC", "Subnet", "Private IP", "Security Groups"},
+		List: func(ctx context.Context, emit func(types.NetworkInterface) error) error {
+			baseFilters := []types.Filter{
+				{Name: aws.String("status"), Values: []string{"available"}},
 			}
-			if _, ok := cache.sgs[id]; !ok {
-				missing = append(missing, id)
+			if len(filterByVPC) > 0 {
+				baseFilters = append(baseFilters, types.Filter{Name: aws.String("vpc-id"), Values: filterByVPC})
 			}
-		}
-		cache.mu.RUnlock()
-		if len(missing) == 0 {
-			return
-		}
-		resp, err := e.AWSClient.EC2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: missing})
-		cache.mu.Lock()
-		defer cache.mu.Unlock()
-		// Default missing to "-" to avoid repeated calls if Describe fails/partial.
-		for _, id := range missing {
-			if _, ok := cache.sgs[id]; !ok {
-				cache.sgs[id] = "-"
+			if len(filterBySubnet) > 0 {
+				baseFilters = append(baseFilters, types.Filter{Name: aws.String("subnet-id"), Values: filterBySubnet})
 			}
-		}
-		if err != nil {
-			return
-		}
-		for _, sg := range resp.SecurityGroups {
-			id := aws.ToString(sg.GroupId)
-			if id == "" {
-				continue
+			if len(filterBySG) > 0 {
+				baseFilters = append(baseFilters, types.Filter{Name: aws.String("group-id"), Values: filterBySG})
 			}
-			name := aws.ToString(sg.GroupName)
-			if name == "" {
-				name = "-"
+			if len(filterByType) > 0 {
+				baseFilters = append(baseFilters, types.Filter{Name: aws.String("interface-type"), Values: filterByType})
 			}
-			cache.sgs[id] = name
-		}
-	}
+			if len(filterByIP) > 0 {
+				baseFilters = append(baseFilters, types.Filter{Name: aws.String("private-ip-address"), Values: filterByIP})
+			}
+			if filterByDesc != "" {
+				// AWS supports wildcards in some EC2 filters (e.g. "*foo*"). Keep value as-is.
+				baseFilters = append(baseFilters, types.Filter{Name: aws.String("description"), Values: []string{filterByDesc}})
+			}
 
-	splitCSV := func(raw string) []string {
-		raw = normalizeFilterValue(raw)
-		if raw == "" {
-			return nil
-		}
-		parts := strings.Split(raw, ",")
-		out := make([]string, 0, len(parts))
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" || p == "*" {
-				continue
-			}
-			out = append(out, p)
-		}
-		if len(out) == 0 {
-			return nil
-		}
-		return out
-	}
+			// Back-compat: include --filter-by-name as a Name-tag filter input.
+			names := splitCSV(filterByName)
 
-	getFlagString := func(name string) string {
-		if v, ok := (*flagValues)[name].(string); ok {
-			return v
-		}
-		return ""
-	}
-
-	mergeCSV := func(names ...string) []string {
-		seen := make(map[string]struct{}, 8)
-		out := make([]string, 0)
-		for _, n := range names {
-			for _, v := range splitCSV(getFlagString(n)) {
-				if _, ok := seen[v]; ok {
-					continue
+			// New UX: allow a single flag to match ENI ID OR tag:Name.
+			ids := make([]string, 0)
+			for _, tok := range filterByENIs {
+				if strings.HasPrefix(tok, "eni-") {
+					ids = append(ids, tok)
+				} else {
+					names = append(names, tok)
 				}
-				seen[v] = struct{}{}
-				out = append(out, v)
 			}
-		}
-		return out
-	}
 
-	eniChan := make(chan types.NetworkInterface, 50)
-	resultsChan := make(chan table.Row, 50)
-
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Describe ENIs (only unattached)
-	g.Go(func() error {
-		baseFilters := []types.Filter{
-			{Name: aws.String("status"), Values: []string{"available"}},
-		}
-
-		if v := mergeCSV("filter-by-vpc", "filter-by-vpc-id"); len(v) > 0 {
-			baseFilters = append(baseFilters, types.Filter{Name: aws.String("vpc-id"), Values: v})
-		}
-		if v := mergeCSV("filter-by-subnet", "filter-by-subnet-id"); len(v) > 0 {
-			baseFilters = append(baseFilters, types.Filter{Name: aws.String("subnet-id"), Values: v})
-		}
-		if v := mergeCSV("filter-by-sg", "filter-by-security-group-id"); len(v) > 0 {
-			baseFilters = append(baseFilters, types.Filter{Name: aws.String("group-id"), Values: v})
-		}
-		if v := mergeCSV("filter-by-type", "filter-by-interface-type"); len(v) > 0 {
-			baseFilters = append(baseFilters, types.Filter{Name: aws.String("interface-type"), Values: v})
-		}
-		if v := mergeCSV("filter-by-ip", "filter-by-private-ip"); len(v) > 0 {
-			baseFilters = append(baseFilters, types.Filter{Name: aws.String("private-ip-address"), Values: v})
-		}
-		desc := normalizeFilterValue(getFlagString("filter-by-desc"))
-		if desc == "" {
-			desc = normalizeFilterValue(getFlagString("filter-by-description"))
-		}
-		if desc != "" {
-			// AWS supports wildcards in some EC2 filters (e.g. "*foo*"). Keep value as-is.
-			baseFilters = append(baseFilters, types.Filter{Name: aws.String("description"), Values: []string{desc}})
-		}
-
-		// Back-compat: include --filter-by-name as a Name-tag filter input.
-		names := splitCSV(getFlagString("filter-by-name"))
-
-		// New UX: allow a single flag to match ENI ID OR tag:Name.
-		ids := make([]string, 0)
-		for _, tok := range mergeCSV("filter-by-enis", "filter-by-id-or-name") {
-			if strings.HasPrefix(tok, "eni-") {
-				ids = append(ids, tok)
-			} else {
-				names = append(names, tok)
+			seen := make(map[string]struct{}, 128)
+			runPage := func(filters []types.Filter) error {
+				paginator := ec2.NewDescribeNetworkInterfacesPaginator(e.AWSClient.EC2, &ec2.DescribeNetworkInterfacesInput{
+					Filters: filters,
+				})
+				for paginator.HasMorePages() {
+					page, err := paginator.NextPage(ctx)
+					if err != nil {
+						return err
+					}
+					for _, ni := range page.NetworkInterfaces {
+						id := aws.ToString(ni.NetworkInterfaceId)
+						if id != "" {
+							if _, ok := seen[id]; ok {
+								continue
+							}
+							seen[id] = struct{}{}
+						}
+						if err := emit(ni); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
 			}
-		}
 
-		seen := make(map[string]struct{}, 128)
-		emit := func(filters []types.Filter) error {
-			paginator := ec2.NewDescribeNetworkInterfacesPaginator(e.AWSClient.EC2, &ec2.DescribeNetworkInterfacesInput{
-				Filters: filters,
-			})
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(egCtx)
-				if err != nil {
+			// If neither id nor name query is provided, just use base filters.
+			if len(ids) == 0 && len(names) == 0 {
+				return runPage(baseFilters)
+			}
+
+			// OR behavior: (network-interface-id IN ids) OR (tag:Name IN names), with baseFilters ANDed.
+			if len(ids) > 0 {
+				f := append(append([]types.Filter{}, baseFilters...), types.Filter{Name: aws.String("network-interface-id"), Values: ids})
+				if err := runPage(f); err != nil {
 					return err
 				}
-				for _, ni := range page.NetworkInterfaces {
-					id := aws.ToString(ni.NetworkInterfaceId)
-					if id != "" {
-						if _, ok := seen[id]; ok {
-							continue
-						}
-						seen[id] = struct{}{}
-					}
-					eniChan <- ni
+			}
+			if len(names) > 0 {
+				f := append(append([]types.Filter{}, baseFilters...), types.Filter{Name: aws.String("tag:Name"), Values: names})
+				if err := runPage(f); err != nil {
+					return err
 				}
 			}
 			return nil
-		}
-
-		// If neither id nor name query is provided, just use base filters.
-		if len(ids) == 0 && len(names) == 0 {
-			if err := emit(baseFilters); err != nil {
-				close(eniChan)
-				return err
+		},
+		Process: func(ctx context.Context, ni types.NetworkInterface) (*orphanENI, error) {
+			eniID := aws.ToString(ni.NetworkInterfaceId)
+			if eniID == "" {
+				return nil, nil
 			}
-			close(eniChan)
-			return nil
-		}
 
-		// OR behavior: (network-interface-id IN ids) OR (tag:Name IN names), with baseFilters ANDed.
-		if len(ids) > 0 {
-			f := append(append([]types.Filter{}, baseFilters...), types.Filter{Name: aws.String("network-interface-id"), Values: ids})
-			if err := emit(f); err != nil {
-				close(eniChan)
-				return err
-			}
-		}
-		if len(names) > 0 {
-			f := append(append([]types.Filter{}, baseFilters...), types.Filter{Name: aws.String("tag:Name"), Values: names})
-			if err := emit(f); err != nil {
-				close(eniChan)
-				return err
-			}
-		}
-
-		close(eniChan)
-		return nil
-	})
-
-	for range NumGoroutines {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return egCtx.Err()
-				case ni, ok := <-eniChan:
-					if !ok {
-						return nil
-					}
-
-					tagMap := utils.TagsToMap(ni.TagSet)
-					name := "-"
-					if t, ok := tagMap["Name"]; ok && t.Value != nil {
-						name = *t.Value
-					}
-
-					eniID := aws.ToString(ni.NetworkInterfaceId)
-					if eniID == "" {
-						continue
-					}
-
-					ifType := string(ni.InterfaceType)
-					if ifType == "" {
-						ifType = "-"
-					}
-					status := string(ni.Status)
-					if status == "" {
-						status = "-"
-					}
-					requesterManaged := aws.ToBool(ni.RequesterManaged)
-					desc := aws.ToString(ni.Description)
-					if desc == "" {
-						desc = "-"
-					}
-					vpcID := aws.ToString(ni.VpcId)
-					if vpcID == "" {
-						vpcID = "-"
-					}
-					subnetID := aws.ToString(ni.SubnetId)
-					if subnetID == "" {
-						subnetID = "-"
-					}
-					privateIP := aws.ToString(ni.PrivateIpAddress)
-					if privateIP == "" {
-						privateIP = "-"
-					}
-
-					sgIDs := "-"
-					sgIDList := make([]string, 0, len(ni.Groups))
-					if len(ni.Groups) > 0 {
-						ids := make([]string, 0, len(ni.Groups))
-						for _, g := range ni.Groups {
-							if id := aws.ToString(g.GroupId); id != "" {
-								ids = append(ids, id)
-								sgIDList = append(sgIDList, id)
-							}
-						}
-						if len(ids) > 0 {
-							sgIDs = strings.Join(ids, ",")
-						}
-					}
-
-					vpcName := getVPCName(egCtx, vpcID)
-					subnetName := getSubnetName(egCtx, subnetID)
-
-					vpcDisplay := formatIDAndName(vpcID, vpcName)
-					subnetDisplay := formatIDAndName(subnetID, subnetName)
-
-					sgDisplay := sgIDs
-					if len(sgIDList) > 0 {
-						ensureSGNames(egCtx, sgIDList)
-						parts := make([]string, 0, len(sgIDList))
-						cache.mu.RLock()
-						for _, id := range sgIDList {
-							parts = append(parts, formatIDAndName(id, cache.sgs[id]))
-						}
-						cache.mu.RUnlock()
-						// One SG per line for readability.
-						sgDisplay = strings.Join(parts, "\n")
-					}
-
-					resultsChan <- table.Row{name, eniID, ifType, status, requesterManaged, desc, vpcDisplay, subnetDisplay, privateIP, sgDisplay}
+			name := "-"
+			for _, t := range ni.TagSet {
+				if aws.ToString(t.Key) == "Name" && t.Value != nil {
+					name = *t.Value
+					break
 				}
 			}
-		})
-	}
 
-	// Stream output + optional delete
-	printDone := make(chan []string, 1)
-	go func() {
-		stream := printer.NewStreamTable(e.Output, true, []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC", "Subnet", "Private IP", "Security Groups"})
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		deleteIDs := make([]string, 0)
-		finish := func() {
-			stream.Close()
-			printDone <- deleteIDs
-		}
-
-		for row := range resultsChan {
-			stream.WriteRow(row...)
-
-			if collectDeletes {
-				// Name, ENI ID, Type, Status, RequesterManaged, ...
-				if len(row) < 5 {
-					continue
-				}
-				eniID, _ := row[1].(string)
-				requesterManaged, _ := row[4].(bool)
-				if requesterManaged {
-					continue
-				}
-				if eniID == "" || eniID == "-" {
-					continue
-				}
-				deleteIDs = append(deleteIDs, eniID)
+			ifType := string(ni.InterfaceType)
+			if ifType == "" {
+				ifType = "-"
 			}
-		}
-		finish()
-	}()
+			status := string(ni.Status)
+			if status == "" {
+				status = "-"
+			}
+			requesterManaged := aws.ToBool(ni.RequesterManaged)
+			desc := aws.ToString(ni.Description)
+			if desc == "" {
+				desc = "-"
+			}
+			vpcID := aws.ToString(ni.VpcId)
+			if vpcID == "" {
+				vpcID = "-"
+			}
+			subnetID := aws.ToString(ni.SubnetId)
+			if subnetID == "" {
+				subnetID = "-"
+			}
+			privateIP := aws.ToString(ni.PrivateIpAddress)
+			if privateIP == "" {
+				privateIP = "-"
+			}
 
-	if err := g.Wait(); err != nil {
-		e.Logger.LogError("Error during ENI processing", err, nil, false)
-		return err
-	}
-	close(resultsChan)
-	deleteIDs := <-printDone
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(e.Prompter, e.Logger)
-		if err != nil {
+			sgIDList := make([]string, 0, len(ni.Groups))
+			for _, g := range ni.Groups {
+				if id := aws.ToString(g.GroupId); id != "" {
+					sgIDList = append(sgIDList, id)
+				}
+			}
+
+			vpcName := e.getVPCName(ctx, cache, vpcID)
+			subnetName := e.getSubnetName(ctx, cache, subnetID)
+			e.ensureSGNames(ctx, cache, sgIDList)
+
+			return &orphanENI{
+				name:             name,
+				id:               eniID,
+				interfaceType:    ifType,
+				status:           status,
+				requesterManaged: requesterManaged,
+				description:      desc,
+				vpcDisplay:       formatIDAndName(vpcID, vpcName),
+				subnetDisplay:    formatIDAndName(subnetID, subnetName),
+				privateIP:        privateIP,
+				securityGroups:   formatSGList(cache, sgIDList),
+			}, nil
+		},
+		ToRow: func(r orphanENI) []any {
+			return []any{r.name, r.id, r.interfaceType, r.status, r.requesterManaged, r.description, r.vpcDisplay, r.subnetDisplay, r.privateIP, r.securityGroups}
+		},
+		Delete: func(ctx context.Context, r orphanENI) error {
+			if r.requesterManaged {
+				return nil // skip AWS-managed ENIs (matches pre-refactor behavior)
+			}
+			if r.id == "" || r.id == "-" {
+				return nil
+			}
+			e.Logger.LogInfo("Deleting ENI", map[string]any{"NetworkInterfaceId": r.id})
+			_, err := e.AWSClient.EC2.DeleteNetworkInterface(ctx, &ec2.DeleteNetworkInterfaceInput{
+				NetworkInterfaceId: aws.String(r.id),
+			})
 			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, eniID := range deleteIDs {
-			e.Logger.LogInfo("Deleting ENI", map[string]any{"NetworkInterfaceId": eniID})
-			if _, err := e.AWSClient.EC2.DeleteNetworkInterface(rootCtx, &ec2.DeleteNetworkInterfaceInput{
-				NetworkInterfaceId: aws.String(eniID),
-			}); err != nil {
-				e.Logger.LogError("Error deleting ENI", err, map[string]any{"NetworkInterfaceId": eniID}, false)
-				return err
-			}
-		}
-	}
-
-	return nil
+		},
+	})
 }
 
-// Legacy pretty-table printer removed in favor of streaming output for low memory usage.
+// findNameTag returns the value of the "Name" tag, or "" if absent/empty.
+func findNameTag(tags []types.Tag) string {
+	for _, t := range tags {
+		if aws.ToString(t.Key) == "Name" && t.Value != nil && aws.ToString(t.Value) != "" {
+			return aws.ToString(t.Value)
+		}
+	}
+	return ""
+}
+
+// formatIDAndName renders "id (name)" when a name is present, "id" otherwise,
+// and "-" when the id itself is empty.
+func formatIDAndName(id string, name string) string {
+	if id == "" || id == "-" {
+		return "-"
+	}
+	if name == "" || name == "-" {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", id, name)
+}
+
+// getVPCName returns the tag:Name of the given VPC, caching the result.
+func (e *AWSCommand) getVPCName(ctx context.Context, cache *eniNameCache, vpcID string) string {
+	if vpcID == "" || vpcID == "-" {
+		return "-"
+	}
+	cache.mu.RLock()
+	if n, ok := cache.vpcs[vpcID]; ok {
+		cache.mu.RUnlock()
+		return n
+	}
+	cache.mu.RUnlock()
+
+	out := "-"
+	resp, err := e.AWSClient.EC2.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{VpcIds: []string{vpcID}})
+	if err == nil && len(resp.Vpcs) > 0 {
+		if n := findNameTag(resp.Vpcs[0].Tags); n != "" {
+			out = n
+		}
+	}
+
+	cache.mu.Lock()
+	cache.vpcs[vpcID] = out
+	cache.mu.Unlock()
+	return out
+}
+
+// getSubnetName returns the tag:Name of the given subnet, caching the result.
+func (e *AWSCommand) getSubnetName(ctx context.Context, cache *eniNameCache, subnetID string) string {
+	if subnetID == "" || subnetID == "-" {
+		return "-"
+	}
+	cache.mu.RLock()
+	if n, ok := cache.subnets[subnetID]; ok {
+		cache.mu.RUnlock()
+		return n
+	}
+	cache.mu.RUnlock()
+
+	out := "-"
+	resp, err := e.AWSClient.EC2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{subnetID}})
+	if err == nil && len(resp.Subnets) > 0 {
+		if n := findNameTag(resp.Subnets[0].Tags); n != "" {
+			out = n
+		}
+	}
+
+	cache.mu.Lock()
+	cache.subnets[subnetID] = out
+	cache.mu.Unlock()
+	return out
+}
+
+// ensureSGNames populates the security-group name cache for any of the given
+// IDs that are not yet cached. On partial failure the missing IDs are cached
+// as "-" so subsequent lookups do not re-issue the same failing request.
+func (e *AWSCommand) ensureSGNames(ctx context.Context, cache *eniNameCache, sgIDs []string) {
+	missing := make([]string, 0)
+	cache.mu.RLock()
+	for _, id := range sgIDs {
+		if id == "" || id == "-" {
+			continue
+		}
+		if _, ok := cache.sgs[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	cache.mu.RUnlock()
+	if len(missing) == 0 {
+		return
+	}
+	resp, err := e.AWSClient.EC2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: missing})
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	// Default missing to "-" to avoid repeated calls if Describe fails/partial.
+	for _, id := range missing {
+		if _, ok := cache.sgs[id]; !ok {
+			cache.sgs[id] = "-"
+		}
+	}
+	if err != nil {
+		return
+	}
+	for _, sg := range resp.SecurityGroups {
+		id := aws.ToString(sg.GroupId)
+		if id == "" {
+			continue
+		}
+		name := aws.ToString(sg.GroupName)
+		if name == "" {
+			name = "-"
+		}
+		cache.sgs[id] = name
+	}
+}
+
+// formatSGList renders a newline-separated "id (Name)" list for the given
+// security group IDs, matching the pre-refactor worker's inline formatting.
+// Returns "-" when no IDs are provided.
+func formatSGList(cache *eniNameCache, sgIDList []string) string {
+	if len(sgIDList) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(sgIDList))
+	cache.mu.RLock()
+	for _, id := range sgIDList {
+		parts = append(parts, formatIDAndName(id, cache.sgs[id]))
+	}
+	cache.mu.RUnlock()
+	// One SG per line for readability.
+	return strings.Join(parts, "\n")
+}
+
+// splitCSV splits a comma-separated flag value into trimmed, non-empty
+// tokens, skipping "*" (which matches the "no filter" sentinel).
+func splitCSV(raw string) []string {
+	raw = normalizeFilterValue(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || p == "*" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// getFlagString returns the string value for the given flag name, or "".
+func getFlagString(flagValues *map[string]any, name string) string {
+	if v, ok := (*flagValues)[name].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// mergeCSV unions the CSV tokens from the named flags, preserving first-seen
+// order and dropping duplicates.
+func mergeCSV(flagValues *map[string]any, names ...string) []string {
+	seen := make(map[string]struct{}, 8)
+	out := make([]string, 0)
+	for _, n := range names {
+		for _, v := range splitCSV(getFlagString(flagValues, n)) {
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
