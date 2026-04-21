@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,9 +30,7 @@ import (
 	"github.com/aws/smithy-go"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -45,75 +41,19 @@ var imagesCmd = &cobra.Command{
 	Short: "List and optionally delete orphan AMIs (and their snapshots)",
 	Long:  `List Amazon Machine Images (AMIs) owned by this account and identify those not used by instances or launch templates.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Create prompter using the prompter package
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-
-		// Create a new context
-		ctx := cmd.Context()
-
-		// Get the flags from the command and also the additional flags specific to this command
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		// Specify additional flags that are specific to this command
-		additionalFlags := []flags.Flag{
-			{
-				Name: "filter-by-name",
-				Type: "string",
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "creation-date-before", Type: "string"},
+				{Name: "creation-date-after", Type: "string"},
+				{Name: "include-used-by-instance", Type: "bool"},
+				{Name: "include-used-by-launch-template", Type: "bool"},
 			},
-			{
-				Name: "creation-date-before",
-				Type: "string",
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
 			},
-			{
-				Name: "creation-date-after",
-				Type: "string",
-			},
-			{
-				Name: "include-used-by-instance",
-				Type: "bool",
-			},
-			{
-				Name: "include-used-by-launch-template",
-				Type: "bool",
-			},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		// Create a new AWS client
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		// Create a new EC2 client
-		ec2Client := ec2.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{
-			EC2: ec2Client,
-		}
-
-		return runImagesCmd(ctx, prompterClient, output, awsClient, flagValues)
+		}, (*AWSCommand).executeImages)
 	},
-}
-
-func runImagesCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-
-	return command.executeImages(ctx, flagValues)
 }
 
 func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]any) error {

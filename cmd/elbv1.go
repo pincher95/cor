@@ -17,8 +17,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 	"sync"
 
@@ -30,9 +28,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -42,48 +38,21 @@ var elbv1Cmd = &cobra.Command{
 	Short: "Return ELB of type Classic",
 	Long:  `Return Classic ELB with instance state unhealthy.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"},
-			{Name: "filter-by-tags", Type: "string"},
-			{Name: "show-unhealthy", Type: "bool"},
-			{Name: "show-tags", Type: "bool"},
-		}
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		awsClient := &handlers.AWSClientImpl{
-			ELBv1: elasticloadbalancing.NewFromConfig(*cfg),
-			EC2:   ec2.NewFromConfig(*cfg),
-		}
-		return runElbv1Cmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "filter-by-tags", Type: "string"},
+				{Name: "show-unhealthy", Type: "bool"},
+				{Name: "show-tags", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{
+					ELBv1: elasticloadbalancing.NewFromConfig(*cfg),
+					EC2:   ec2.NewFromConfig(*cfg),
+				}
+			},
+		}, (*AWSCommand).executeElbv1)
 	},
-}
-
-func runElbv1Cmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeElbv1(ctx, flagValues)
 }
 
 func (e *AWSCommand) executeElbv1(ctx context.Context, flagValues *map[string]any) error {

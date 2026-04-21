@@ -18,8 +18,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"sync"
 
@@ -29,9 +27,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -43,50 +39,28 @@ var enisCmd = &cobra.Command{
 	Short: "Return orphaned ENIs (unattached network interfaces)",
 	Long:  `Find and optionally delete network interfaces in "available" state (not attached).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"},
-			// New short flags
-			{Name: "filter-by-enis", Type: "string"},
-			{Name: "filter-by-vpc", Type: "string"},
-			{Name: "filter-by-subnet", Type: "string"},
-			{Name: "filter-by-sg", Type: "string"},
-			{Name: "filter-by-type", Type: "string"},
-			{Name: "filter-by-desc", Type: "string"},
-			{Name: "filter-by-ip", Type: "string"},
-
-			// Backwards-compatible aliases (hidden/deprecated in init())
-			{Name: "filter-by-id-or-name", Type: "string"},
-			{Name: "filter-by-vpc-id", Type: "string"},
-			{Name: "filter-by-subnet-id", Type: "string"},
-			{Name: "filter-by-security-group-id", Type: "string"},
-			{Name: "filter-by-interface-type", Type: "string"},
-			{Name: "filter-by-description", Type: "string"},
-			{Name: "filter-by-private-ip", Type: "string"},
-		}
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		ec2Client := ec2.NewFromConfig(*cfg)
-		awsClient := &handlers.AWSClientImpl{EC2: ec2Client}
-
-		return runENIsCmd(ctx, &prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "filter-by-enis", Type: "string"},
+				{Name: "filter-by-vpc", Type: "string"},
+				{Name: "filter-by-subnet", Type: "string"},
+				{Name: "filter-by-sg", Type: "string"},
+				{Name: "filter-by-type", Type: "string"},
+				{Name: "filter-by-desc", Type: "string"},
+				{Name: "filter-by-ip", Type: "string"},
+				{Name: "filter-by-id-or-name", Type: "string"},
+				{Name: "filter-by-vpc-id", Type: "string"},
+				{Name: "filter-by-subnet-id", Type: "string"},
+				{Name: "filter-by-security-group-id", Type: "string"},
+				{Name: "filter-by-interface-type", Type: "string"},
+				{Name: "filter-by-description", Type: "string"},
+				{Name: "filter-by-private-ip", Type: "string"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeENIs)
 	},
 }
 
@@ -126,16 +100,6 @@ func init() {
 	_ = enisCmd.Flags().MarkHidden("filter-by-interface-type")
 	_ = enisCmd.Flags().MarkHidden("filter-by-description")
 	_ = enisCmd.Flags().MarkHidden("filter-by-private-ip")
-}
-
-func runENIsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  *prompter,
-		Output:    output,
-	}
-	return command.executeENIs(ctx, flagValues)
 }
 
 func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any) error {
