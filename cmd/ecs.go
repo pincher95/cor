@@ -25,6 +25,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// orphanECSCluster predates the orphanX + lowercase-fields naming convention
+// used by orphanVolume / orphanNatGateway / orphanTargetGroup. Left as-is
+// because checkECSOrphan (also pre-existing) references the exported fields.
 type orphanECSCluster struct {
 	ClusterName     string
 	ClusterARN      string
@@ -64,7 +67,8 @@ func init() {
 
 func (a *AWSCommand) executeECS(ctx context.Context, flagValues *map[string]any) error {
 	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanECSCluster]{
-		Headers: []string{"Cluster Name", "Status", "Registered Tasks", "Running Tasks", "Services", "Reason"},
+		Headers:   []string{"Cluster Name", "Status", "Registered Tasks", "Running Tasks", "Services", "Reason"},
+		HideIndex: true,
 		List: func(ctx context.Context, emit func(string) error) error {
 			p := ecs.NewListClustersPaginator(a.AWSClient.ECS, &ecs.ListClustersInput{})
 			for p.HasMorePages() {
@@ -81,7 +85,14 @@ func (a *AWSCommand) executeECS(ctx context.Context, flagValues *map[string]any)
 			return nil
 		},
 		Process: func(ctx context.Context, clusterARN string) (*orphanECSCluster, error) {
-			return a.checkECSOrphan(ctx, clusterARN)
+			orphan, err := a.checkECSOrphan(ctx, clusterARN)
+			if err != nil {
+				a.Logger.LogError("Error checking ECS cluster", err, map[string]any{
+					"cluster": clusterARN,
+				}, false)
+				return nil, nil // skip this cluster, continue the pipeline
+			}
+			return orphan, nil
 		},
 		ToRow: func(r orphanECSCluster) []any {
 			return []any{r.ClusterName, r.Status, r.RegisteredTasks, r.RunningTasks, r.ServicesCount, r.Reason}

@@ -30,6 +30,11 @@ import (
 type OrphanPipeline[Item, Result any] struct {
 	Headers []string
 
+	// HideIndex suppresses the leading "#" index column. Default false
+	// (index column shown). Commands that predate this helper's
+	// streaming-table defaults may opt out via HideIndex: true.
+	HideIndex bool
+
 	// List paginates or lists the resource type. It must call emit once
 	// per item; emit handles the context-aware handoff to the worker
 	// pool. If emit returns a non-nil error, List must propagate it
@@ -125,7 +130,7 @@ func runOrphanPipeline[Item, Result any](
 	collectorDone := make(chan struct{})
 	go func() {
 		defer close(collectorDone)
-		stream := printer.NewStreamTable(a.Output, true, spec.Headers)
+		stream := printer.NewStreamTable(a.Output, !spec.HideIndex, spec.Headers)
 		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
 		defer stream.Close()
 		for r := range resultChan {

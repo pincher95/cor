@@ -47,19 +47,19 @@ func init() {
 	natgatewaysCmd.Flags().String("filter-by-state", "available", "Filter NAT Gateways by state (available, deleted, deleting, failed, pending)")
 }
 
-type natGatewayInfo struct {
-	Name    string
-	ID      string
-	State   string
-	VpcID   string
-	Subnet  string
-	Created string
+type orphanNatGateway struct {
+	name    string
+	id      string
+	state   string
+	vpcID   string
+	subnet  string
+	created string
 }
 
 func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[string]any) error {
 	stateFilter := (*flagValues)["filter-by-state"].(string)
 
-	return runOrphanPipeline(c, ctx, flagValues, OrphanPipeline[types.NatGateway, natGatewayInfo]{
+	return runOrphanPipeline(c, ctx, flagValues, OrphanPipeline[types.NatGateway, orphanNatGateway]{
 		Headers: []string{"Name", "ID", "State", "VPC", "Subnet", "Created"},
 		List: func(ctx context.Context, emit func(types.NatGateway) error) error {
 			filters := []types.Filter{}
@@ -83,7 +83,7 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 			}
 			return nil
 		},
-		Process: func(_ context.Context, ng types.NatGateway) (*natGatewayInfo, error) {
+		Process: func(_ context.Context, ng types.NatGateway) (*orphanNatGateway, error) {
 			name := "-"
 			for _, tag := range ng.Tags {
 				if tag.Key != nil && *tag.Key == "Name" && tag.Value != nil {
@@ -91,21 +91,21 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 					break
 				}
 			}
-			return &natGatewayInfo{
-				Name:    name,
-				ID:      aws.ToString(ng.NatGatewayId),
-				State:   string(ng.State),
-				VpcID:   aws.ToString(ng.VpcId),
-				Subnet:  aws.ToString(ng.SubnetId),
-				Created: ng.CreateTime.String(),
+			return &orphanNatGateway{
+				name:    name,
+				id:      aws.ToString(ng.NatGatewayId),
+				state:   string(ng.State),
+				vpcID:   aws.ToString(ng.VpcId),
+				subnet:  aws.ToString(ng.SubnetId),
+				created: ng.CreateTime.String(),
 			}, nil
 		},
-		ToRow: func(r natGatewayInfo) []any {
-			return []any{r.Name, r.ID, r.State, r.VpcID, r.Subnet, r.Created}
+		ToRow: func(r orphanNatGateway) []any {
+			return []any{r.name, r.id, r.state, r.vpcID, r.subnet, r.created}
 		},
-		Delete: func(ctx context.Context, r natGatewayInfo) error {
-			c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": r.ID, "Name": r.Name})
-			_, err := c.AWSClient.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(r.ID)})
+		Delete: func(ctx context.Context, r orphanNatGateway) error {
+			c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": r.id, "Name": r.name})
+			_, err := c.AWSClient.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(r.id)})
 			return err
 		},
 	})
