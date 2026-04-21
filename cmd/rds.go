@@ -59,6 +59,11 @@ type rdsResource struct {
 }
 
 func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any) error {
+	// If neither flag is set, default to both true (preserves pre-runner behavior).
+	if !(*flagValues)["include-instances"].(bool) && !(*flagValues)["include-snapshots"].(bool) {
+		(*flagValues)["include-instances"] = true
+		(*flagValues)["include-snapshots"] = true
+	}
 	rootCtx := ctx
 
 	collectDeletes := (*flagValues)["delete"].(bool)
