@@ -125,7 +125,6 @@ func (a *AWSCommand) executeLambda(ctx context.Context, flagValues *map[string]a
 				a.Logger.LogError("Failed to delete Lambda function", err, map[string]any{"function": r.Name}, false)
 				return err
 			}
-			a.Logger.LogInfo(fmt.Sprintf("Deleted Lambda function: %s", r.Name), nil)
 			return nil
 		},
 	})

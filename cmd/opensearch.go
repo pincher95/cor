@@ -97,6 +97,9 @@ func (a *AWSCommand) executeOpenSearch(ctx context.Context, flagValues *map[stri
 			}
 			return nil
 		},
+		// DescribeDomain is inlined here (not called from checkOpenSearchOrphan)
+		// because the helper takes *DomainStatus rather than a domain-name string
+		// like the other CloudWatch-enrichment helpers.
 		Process: func(ctx context.Context, domainName string) (*orphanOpenSearchDomain, error) {
 			domainOutput, err := a.AWSClient.OpenSearch.DescribeDomain(ctx, &opensearch.DescribeDomainInput{
 				DomainName: aws.String(domainName),
