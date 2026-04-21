@@ -38,6 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"github.com/aws/aws-sdk-go-v2/service/efs"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/opensearch"
@@ -50,6 +51,7 @@ import (
 type AWSClientImpl struct {
 	EC2         *ec2.Client
 	ELB         *elasticloadbalancingv2.Client
+	ELBv1       *elasticloadbalancing.Client
 	STS         *sts.Client
 	ASG         *autoscaling.Client
 	RDS         *rds.Client

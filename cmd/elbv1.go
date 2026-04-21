@@ -17,6 +17,7 @@ package cmd
 
 import (
 	"context"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -41,15 +42,11 @@ var elbv1Cmd = &cobra.Command{
 	Short: "Return ELB of type Classic",
 	Long:  `Return Classic ELB with instance state unhealthy.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
+		output := os.Stdout
 		ctx := cmd.Context()
 
-		// Create a new logger and error handler
-		logger := logging.NewLogger()
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-
-		// Get the flags from the command and also the additional flags specific to this command
 		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		// Specify additional flags that are specific to this command
 		additionalFlags := []flags.Flag{
 			{Name: "filter-by-name", Type: "string"},
 			{Name: "filter-by-tags", Type: "string"},
@@ -58,7 +55,6 @@ var elbv1Cmd = &cobra.Command{
 		}
 		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
 		if err != nil {
-			logger.LogError("Error getting flags", err, nil, true)
 			return err
 		}
 
@@ -67,118 +63,130 @@ var elbv1Cmd = &cobra.Command{
 			Profile:    aws.String((*flagValues)["profile"].(string)),
 			Region:     aws.String((*flagValues)["region"].(string)),
 		}
-
 		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
 		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
 			return err
 		}
 
-		client := elasticloadbalancing.NewFromConfig(*cfg)
-		ec2Client := ec2.NewFromConfig(*cfg)
-
-		collectDeletes := (*flagValues)["delete"].(bool)
-
-		var wg sync.WaitGroup
-		loadBalancerChan := make(chan types.LoadBalancerDescription, 100)
-		tableRowChan := make(chan elbv1Result, 100)
-		errorChan := make(chan error, 1)
-
-		showUnhealthy := (*flagValues)["show-unhealthy"].(bool)
-		showTags := (*flagValues)["show-tags"].(bool)
-		filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-		tagFilters := parseTagFilters((*flagValues)["filter-by-tags"].(string))
-
-		headers := []string{"LoadBalancer Name", "number of listeners", "targets without instances"}
-		if showUnhealthy {
-			headers = append(headers, "targets unhealthy")
+		awsClient := &handlers.AWSClientImpl{
+			ELBv1: elasticloadbalancing.NewFromConfig(*cfg),
+			EC2:   ec2.NewFromConfig(*cfg),
 		}
-		headers = append(headers, "VPC ID")
-		if showTags {
-			headers = append(headers, "Tags")
-		}
-		stream := printer.NewStreamTable(os.Stdout, true, headers)
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-		defer stream.Close()
+		return runElbv1Cmd(ctx, prompterClient, output, awsClient, flagValues)
+	},
+}
 
+func runElbv1Cmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
+	command := &AWSCommand{
+		AWSClient: *awsClient,
+		Logger:    logging.NewLogger(),
+		Prompter:  prompter,
+		Output:    output,
+	}
+	return command.executeElbv1(ctx, flagValues)
+}
+
+func (e *AWSCommand) executeElbv1(ctx context.Context, flagValues *map[string]any) error {
+	collectDeletes := (*flagValues)["delete"].(bool)
+
+	var wg sync.WaitGroup
+	loadBalancerChan := make(chan types.LoadBalancerDescription, 100)
+	tableRowChan := make(chan elbv1Result, 100)
+	errorChan := make(chan error, 1)
+
+	showUnhealthy := (*flagValues)["show-unhealthy"].(bool)
+	showTags := (*flagValues)["show-tags"].(bool)
+	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	tagFilters := parseTagFilters((*flagValues)["filter-by-tags"].(string))
+
+	headers := []string{"LoadBalancer Name", "number of listeners", "targets without instances"}
+	if showUnhealthy {
+		headers = append(headers, "targets unhealthy")
+	}
+	headers = append(headers, "VPC ID")
+	if showTags {
+		headers = append(headers, "Tags")
+	}
+	stream := printer.NewStreamTable(e.Output, true, headers)
+	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	defer stream.Close()
+
+	wg.Go(func() {
+		if err := describeLoadBalancers(ctx, e.AWSClient.ELBv1, loadBalancerChan); err != nil {
+			errorChan <- err
+			close(loadBalancerChan)
+			return
+		}
+		close(loadBalancerChan)
+	})
+
+	for lb := range loadBalancerChan {
 		wg.Go(func() {
-			if err := describeLoadBalancers(ctx, client, loadBalancerChan); err != nil {
-				errorChan <- err
-				close(loadBalancerChan)
+			if !matchesFilterValue(aws.ToString(lb.LoadBalancerName), filterByName) {
 				return
 			}
-			close(loadBalancerChan)
+			tableRow, deleteName, err := handleLoadBalancer(ctx, &lb, e.AWSClient.ELBv1, e.AWSClient.EC2, showUnhealthy, showTags, tagFilters)
+			if err != nil {
+				errorChan <- err
+				return
+			}
+			if tableRow != nil {
+				tableRowChan <- elbv1Result{row: tableRow, deleteName: deleteName}
+			}
 		})
+	}
 
-		// Start a goroutine to process load balancers
-		for lb := range loadBalancerChan {
-			wg.Go(func() {
-				if !matchesFilterValue(aws.ToString(lb.LoadBalancerName), filterByName) {
-					return
-				}
-				tableRow, deleteName, err := handleLoadBalancer(ctx, &lb, client, ec2Client, showUnhealthy, showTags, tagFilters)
-				if err != nil {
-					errorChan <- err
-					return
-				}
-				if tableRow != nil {
-					tableRowChan <- elbv1Result{row: tableRow, deleteName: deleteName}
-				}
-			})
-		}
+	doneChan := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
 
-		doneChan := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(doneChan)
-		}()
-
-		deleteNames := make([]string, 0)
-		for {
-			select {
-			case err := <-errorChan:
-				logger.LogError("Error during loadbalancer processing", err, nil, true)
-				return err
-			case res := <-tableRowChan:
-				if res.row != nil && len(*res.row) > 0 {
-					stream.WriteRow((*res.row)...)
+	deleteNames := make([]string, 0)
+	for {
+		select {
+		case err := <-errorChan:
+			e.Logger.LogError("Error during loadbalancer processing", err, nil, true)
+			return err
+		case res := <-tableRowChan:
+			if res.row != nil && len(*res.row) > 0 {
+				stream.WriteRow((*res.row)...)
+			}
+			if collectDeletes && res.deleteName != "" {
+				deleteNames = append(deleteNames, res.deleteName)
+			}
+		case <-doneChan:
+			close(tableRowChan)
+			for res := range tableRowChan {
+				if res.row == nil || len(*res.row) == 0 {
+					continue
 				}
+				stream.WriteRow((*res.row)...)
 				if collectDeletes && res.deleteName != "" {
 					deleteNames = append(deleteNames, res.deleteName)
 				}
-			case <-doneChan:
-				close(tableRowChan)
-				for res := range tableRowChan {
-					if res.row == nil || len(*res.row) == 0 {
-						continue
-					}
-					stream.WriteRow((*res.row)...)
-					if collectDeletes && res.deleteName != "" {
-						deleteNames = append(deleteNames, res.deleteName)
-					}
-				}
-				if !collectDeletes || len(deleteNames) == 0 {
-					return nil
-				}
-				confirm, err := confirmDelete(prompterClient, logger)
-				if err != nil {
-					return err
-				}
-				if !confirm {
-					return nil
-				}
-				for _, lbName := range deleteNames {
-					logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": lbName})
-					if _, err := client.DeleteLoadBalancer(ctx, &elasticloadbalancing.DeleteLoadBalancerInput{
-						LoadBalancerName: aws.String(lbName),
-					}); err != nil {
-						return err
-					}
-				}
+			}
+			if !collectDeletes || len(deleteNames) == 0 {
 				return nil
 			}
+			confirm, err := confirmDelete(e.Prompter, e.Logger)
+			if err != nil {
+				return err
+			}
+			if !confirm {
+				return nil
+			}
+			for _, lbName := range deleteNames {
+				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": lbName})
+				if _, err := e.AWSClient.ELBv1.DeleteLoadBalancer(ctx, &elasticloadbalancing.DeleteLoadBalancerInput{
+					LoadBalancerName: aws.String(lbName),
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-	},
+	}
 }
 
 func init() {
