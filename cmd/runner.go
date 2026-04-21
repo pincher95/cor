@@ -12,6 +12,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 
@@ -26,7 +27,7 @@ import (
 // CommandSetup declares per-command variation for runResourceCommand.
 // AdditionalFlags lists flags specific to this subcommand (global flags are
 // always included). BuildClients constructs the minimal AWSClientImpl the
-// command needs from the resolved aws.Config.
+// command needs from the resolved aws.Config; it must not return nil.
 type CommandSetup struct {
 	AdditionalFlags []flags.Flag
 	BuildClients    func(cfg *aws.Config) *handlers.AWSClientImpl
@@ -40,6 +41,12 @@ var newConfigFn = handlers.NewConfig
 // The execute callback receives the fully assembled AWSCommand plus the flag values
 // and performs the command-specific work. Bind existing methods via Go's
 // method-expression form, e.g. (*AWSCommand).executeVolumes.
+//
+// The execute callback's argument order — (awsCmd, ctx, flagValues) — is
+// load-bearing: do not reorder. The *AWSCommand-first position is required by
+// the method-expression form so bindings like (*AWSCommand).executeVolumes
+// match the parameter type without any change to the 25 existing executeX
+// methods.
 func runResourceCommand(
 	cmd *cobra.Command,
 	setup CommandSetup,
@@ -63,7 +70,11 @@ func runResourceCommand(
 		return err
 	}
 
-	awsCmd := newAWSCommand(setup.BuildClients(cfg), cloudConfig, os.Stdin, os.Stdout)
+	client := setup.BuildClients(cfg)
+	if client == nil {
+		return fmt.Errorf("runResourceCommand: BuildClients returned nil")
+	}
+	awsCmd := newAWSCommand(client, cloudConfig, os.Stdin, os.Stdout)
 	return execute(awsCmd, ctx, flagValues)
 }
 
