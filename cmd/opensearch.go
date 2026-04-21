@@ -18,8 +18,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,9 +28,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -65,59 +61,24 @@ Orphaned OpenSearch domains can incur significant costs:
 - Storage: $0.135/GB-month (EBS)
 - Data transfer costs`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-		logger := logging.NewLogger()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "days-no-indexing", Type: "int"},
-			{Name: "hours-no-searches", Type: "int"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			logger.LogError("Error getting flags", err, nil, true)
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
-			return err
-		}
-
-		opensearchClient := opensearch.NewFromConfig(*cfg)
-		cwClient := cloudwatch.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{}
-		awsClient.OpenSearch = opensearchClient
-		awsClient.CloudWatch = cwClient
-
-		return runOpenSearchCmd(ctx, &prompterClient, output, awsClient, flagValues, logger)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "days-no-indexing", Type: "int"},
+				{Name: "hours-no-searches", Type: "int"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{
+					OpenSearch: opensearch.NewFromConfig(*cfg),
+					CloudWatch: cloudwatch.NewFromConfig(*cfg),
+				}
+			},
+		}, (*AWSCommand).executeOpenSearch)
 	},
 }
 
 func init() {
 	opensearchCmd.Flags().Int("days-no-indexing", 7, "Consider domains orphaned if no indexing for this many days")
 	opensearchCmd.Flags().Int("hours-no-searches", 24, "Consider domains orphaned if no searches for this many hours")
-}
-
-func runOpenSearchCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any, logger *logging.Logger) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logger,
-		Prompter:  *prompter,
-		Output:    output,
-	}
-
-	return command.executeOpenSearch(ctx, flagValues)
 }
 
 func (a *AWSCommand) executeOpenSearch(ctx context.Context, flagValues *map[string]any) error {
