@@ -17,8 +17,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -28,9 +26,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -41,55 +37,24 @@ var targetgroupsCmd = &cobra.Command{
 	Short: "Return orphaned ELBv2 target groups (not attached to any load balancer)",
 	Long:  `Find and optionally delete ELBv2 target groups whose LoadBalancerArns list is empty.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"},
-			{Name: "include-attached", Type: "bool"},
-		}
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		elbClient := elasticloadbalancingv2.NewFromConfig(*cfg)
-		ec2Client := ec2.NewFromConfig(*cfg) // only used for account context consistency
-
-		awsClient := &handlers.AWSClientImpl{
-			ELB: elbClient,
-			EC2: ec2Client,
-		}
-
-		return runTargetGroupsCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "include-attached", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{
+					ELB: elasticloadbalancingv2.NewFromConfig(*cfg),
+					EC2: ec2.NewFromConfig(*cfg),
+				}
+			},
+		}, (*AWSCommand).executeTargetGroups)
 	},
 }
 
 func init() {
 	targetgroupsCmd.Flags().String("filter-by-name", "", "Filter by target group name (substring match).")
 	targetgroupsCmd.Flags().Bool("include-attached", false, "Include target groups attached to load balancers (default: show only orphans).")
-}
-
-func runTargetGroupsCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeTargetGroups(ctx, flagValues)
 }
 
 func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[string]any) error {

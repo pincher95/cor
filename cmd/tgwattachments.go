@@ -18,8 +18,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,9 +25,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -38,36 +34,16 @@ var tgwAttachmentsCmd = &cobra.Command{
 	Short: "List and optionally delete Transit Gateway VPC attachments without route table association",
 	Long:  `List Transit Gateway VPC attachments that are not associated with a route table and optionally delete them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "include-associated", Type: "bool"},
-			{Name: "include-non-vpc", Type: "bool"},
-			{Name: "filter-by-resource", Type: "string"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		ec2Client := ec2.NewFromConfig(*cfg)
-		awsClient := &handlers.AWSClientImpl{EC2: ec2Client}
-
-		return runTGWAttachmentsCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "include-associated", Type: "bool"},
+				{Name: "include-non-vpc", Type: "bool"},
+				{Name: "filter-by-resource", Type: "string"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeTGWAttachments)
 	},
 }
 
@@ -75,16 +51,6 @@ func init() {
 	tgwAttachmentsCmd.Flags().Bool("include-associated", false, "Include attachments associated with a route table.")
 	tgwAttachmentsCmd.Flags().Bool("include-non-vpc", false, "Include non-VPC attachments (only VPC attachments can be deleted).")
 	tgwAttachmentsCmd.Flags().String("filter-by-resource", "", "Filter by resource ID (substring match).")
-}
-
-func runTGWAttachmentsCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeTGWAttachments(ctx, flagValues)
 }
 
 func (t *AWSCommand) executeTGWAttachments(ctx context.Context, flagValues *map[string]any) error {

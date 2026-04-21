@@ -18,8 +18,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,9 +25,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -39,36 +35,16 @@ var vpcEndpointsCmd = &cobra.Command{
 	Short: "List and optionally delete orphan interface VPC endpoints",
 	Long:  `List interface VPC endpoints that have no network interfaces and optionally delete them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-service", Type: "string"},
-			{Name: "include-attached", Type: "bool"},
-			{Name: "include-non-interface", Type: "bool"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		ec2Client := ec2.NewFromConfig(*cfg)
-		awsClient := &handlers.AWSClientImpl{EC2: ec2Client}
-
-		return runVPCEndpointsCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-service", Type: "string"},
+				{Name: "include-attached", Type: "bool"},
+				{Name: "include-non-interface", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeVPCEndpoints)
 	},
 }
 
@@ -76,16 +52,6 @@ func init() {
 	vpcEndpointsCmd.Flags().String("filter-by-service", "", "Filter by VPC endpoint service name (substring match).")
 	vpcEndpointsCmd.Flags().Bool("include-attached", false, "Include endpoints that have network interfaces attached.")
 	vpcEndpointsCmd.Flags().Bool("include-non-interface", false, "Include non-interface endpoints (gateway endpoints are typically free).")
-}
-
-func runVPCEndpointsCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeVPCEndpoints(ctx, flagValues)
 }
 
 func (v *AWSCommand) executeVPCEndpoints(ctx context.Context, flagValues *map[string]any) error {
