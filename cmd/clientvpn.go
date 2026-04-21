@@ -18,8 +18,6 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,9 +25,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -38,51 +34,21 @@ var clientVPNCmd = &cobra.Command{
 	Short: "List and optionally delete Client VPN endpoints with zero active connections",
 	Long:  `List Client VPN endpoints that have no active connections and optionally delete them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"},
-			{Name: "include-active", Type: "bool"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		ec2Client := ec2.NewFromConfig(*cfg)
-		awsClient := &handlers.AWSClientImpl{EC2: ec2Client}
-
-		return runClientVPNCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "include-active", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeClientVPN)
 	},
 }
 
 func init() {
 	clientVPNCmd.Flags().String("filter-by-name", "", "Filter Client VPN endpoints by description (substring match).")
 	clientVPNCmd.Flags().Bool("include-active", false, "Include endpoints with active connections.")
-}
-
-func runClientVPNCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeClientVPN(ctx, flagValues)
 }
 
 func (c *AWSCommand) executeClientVPN(ctx context.Context, flagValues *map[string]any) error {

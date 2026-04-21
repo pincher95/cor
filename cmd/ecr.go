@@ -19,8 +19,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -30,9 +28,7 @@ import (
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -42,36 +38,16 @@ var ecrCmd = &cobra.Command{
 	Short: "List and optionally delete untagged/old ECR images",
 	Long:  `List ECR images that are untagged and/or older than a threshold, and optionally delete them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"}, // repository name filter
-			{Name: "untagged-only", Type: "bool"},
-			{Name: "older-than-days", Type: "string"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		ecrClient := ecr.NewFromConfig(*cfg)
-		awsClient := &handlers.AWSClientImpl{ECR: ecrClient}
-
-		return runECRCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "untagged-only", Type: "bool"},
+				{Name: "older-than-days", Type: "string"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{ECR: ecr.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeECR)
 	},
 }
 
@@ -79,16 +55,6 @@ func init() {
 	ecrCmd.Flags().String("filter-by-name", "", "Filter by ECR repository name (substring match).")
 	ecrCmd.Flags().Bool("untagged-only", true, "Include untagged images.")
 	ecrCmd.Flags().String("older-than-days", "", "Include images older than N days (e.g. 30).")
-}
-
-func runECRCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-	return command.executeECR(ctx, flagValues)
 }
 
 func (e *AWSCommand) executeECR(ctx context.Context, flagValues *map[string]any) error {

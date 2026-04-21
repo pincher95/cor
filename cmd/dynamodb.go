@@ -18,8 +18,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,9 +28,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -63,57 +59,22 @@ Orphaned DynamoDB tables can incur costs:
 - Storage: $0.25/GB-month
 - On-demand is typically better for unused tables`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-		logger := logging.NewLogger()
-
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "days-no-activity", Type: "int"},
-		}
-
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			logger.LogError("Error getting flags", err, nil, true)
-			return err
-		}
-
-		cloudConfig := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-		cfg, err := handlers.NewConfig(ctx, *cloudConfig, "UTC", true, true)
-		if err != nil {
-			logger.LogError("Failed loading AWS client config", err, nil, true)
-			return err
-		}
-
-		dynamodbClient := dynamodb.NewFromConfig(*cfg)
-		cwClient := cloudwatch.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{}
-		awsClient.DynamoDB = dynamodbClient
-		awsClient.CloudWatch = cwClient
-
-		return runDynamoDBCmd(ctx, &prompterClient, output, awsClient, flagValues, logger)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "days-no-activity", Type: "int"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{
+					DynamoDB:   dynamodb.NewFromConfig(*cfg),
+					CloudWatch: cloudwatch.NewFromConfig(*cfg),
+				}
+			},
+		}, (*AWSCommand).executeDynamoDB)
 	},
 }
 
 func init() {
 	dynamodbCmd.Flags().Int("days-no-activity", 30, "Consider tables orphaned if no activity for this many days")
-}
-
-func runDynamoDBCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any, logger *logging.Logger) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logger,
-		Prompter:  *prompter,
-		Output:    output,
-	}
-
-	return command.executeDynamoDB(ctx, flagValues)
 }
 
 func (a *AWSCommand) executeDynamoDB(ctx context.Context, flagValues *map[string]any) error {

@@ -18,17 +18,13 @@ package cmd
 
 import (
 	"context"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 )
 
@@ -38,54 +34,16 @@ var autoscalingCmd = &cobra.Command{
 	Short: "Delete orphaned AWS Auto Scaling Groups",
 	Long:  `Find and optionally delete unused Auto Scaling Groups (ASG) that have no active instances attached`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Prepare helpers
-		prompterClient := prompter.NewConsolePrompter(os.Stdin, os.Stdout)
-		output := os.Stdout
-		ctx := cmd.Context()
-
-		// Retrieve global + command specific flags
-		flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-		additionalFlags := []flags.Flag{
-			{Name: "filter-by-name", Type: "string"},
-			{Name: "force", Type: "bool"},
-		}
-		flagValues, err := flags.GetFlags(flagRetriever, additionalFlags)
-		if err != nil {
-			return err
-		}
-
-		// Create shared AWS config based on flags
-		cloudCfg := &handlers.CloudConfig{
-			AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-			Profile:    aws.String((*flagValues)["profile"].(string)),
-			Region:     aws.String((*flagValues)["region"].(string)),
-		}
-
-		cfg, err := handlers.NewConfig(ctx, *cloudCfg, "UTC", true, true)
-		if err != nil {
-			return err
-		}
-
-		// Create service client
-		asgClient := autoscaling.NewFromConfig(*cfg)
-
-		awsClient := &handlers.AWSClientImpl{
-			ASG: asgClient,
-		}
-
-		return runAutoscalingCmd(ctx, prompterClient, output, awsClient, flagValues)
+		return runResourceCommand(cmd, CommandSetup{
+			AdditionalFlags: []flags.Flag{
+				{Name: "filter-by-name", Type: "string"},
+				{Name: "force", Type: "bool"},
+			},
+			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
+				return &handlers.AWSClientImpl{ASG: autoscaling.NewFromConfig(*cfg)}
+			},
+		}, (*AWSCommand).executeAutoscaling)
 	},
-}
-
-func runAutoscalingCmd(ctx context.Context, prompter prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any) error {
-	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logging.NewLogger(),
-		Prompter:  prompter,
-		Output:    output,
-	}
-
-	return command.executeAutoscaling(ctx, flagValues)
 }
 
 func (b *AWSCommand) executeAutoscaling(ctx context.Context, flagValues *map[string]any) error {
