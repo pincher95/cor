@@ -35,10 +35,11 @@ const (
 )
 
 type AWSCommand struct {
-	AWSClient handlers.AWSClientImpl
-	Logger    *logging.Logger
-	Prompter  prompter.Client
-	Output    io.Writer
+	AWSClient   handlers.AWSClientImpl
+	CloudConfig *handlers.CloudConfig
+	Logger      *logging.Logger
+	Prompter    prompter.Client
+	Output      io.Writer
 }
 
 var cfgFile string

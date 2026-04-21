@@ -104,16 +104,17 @@ func init() {
 
 func runS3BucketsCmd(ctx context.Context, prompter *prompter.Client, output io.Writer, awsClient *handlers.AWSClientImpl, flagValues *map[string]any, logger *logging.Logger, cloudConfig *handlers.CloudConfig) error {
 	command := &AWSCommand{
-		AWSClient: *awsClient,
-		Logger:    logger,
-		Prompter:  *prompter,
-		Output:    output,
+		AWSClient:   *awsClient,
+		CloudConfig: cloudConfig,
+		Logger:      logger,
+		Prompter:    *prompter,
+		Output:      output,
 	}
 
-	return command.executeS3Buckets(ctx, flagValues, cloudConfig)
+	return command.executeS3Buckets(ctx, flagValues)
 }
 
-func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[string]any, cloudConfig *handlers.CloudConfig) error {
+func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[string]any) error {
 	rootCtx := ctx
 	collectDeletes := (*flagValues)["delete"].(bool)
 	checkLifecycle := (*flagValues)["check-lifecycle"].(bool)
@@ -155,7 +156,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[strin
 						return nil
 					}
 
-					orphan, err := a.checkS3BucketOrphan(egCtx, bucket, checkLifecycle, cloudConfig)
+					orphan, err := a.checkS3BucketOrphan(egCtx, bucket, checkLifecycle)
 					if err != nil {
 						a.Logger.LogError("Error checking S3 bucket", err, map[string]any{
 							"bucket": aws.ToString(bucket.Name),
@@ -225,7 +226,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[strin
 		for _, bucket := range orphanBuckets {
 			// First, abort incomplete multipart uploads
 			if bucket.IncompleteUploads > 0 {
-				if err := a.abortMultipartUploads(rootCtx, bucket.BucketName, bucket.Region, cloudConfig); err != nil {
+				if err := a.abortMultipartUploads(rootCtx, bucket.BucketName, bucket.Region); err != nil {
 					a.Logger.LogError("Failed to abort multipart uploads", err, map[string]any{
 						"bucket": bucket.BucketName,
 					}, false)
@@ -235,7 +236,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[strin
 
 			// Only delete if bucket is empty
 			if bucket.IsEmpty {
-				if err := a.deleteS3Bucket(rootCtx, bucket.BucketName, bucket.Region, cloudConfig); err != nil {
+				if err := a.deleteS3Bucket(rootCtx, bucket.BucketName, bucket.Region); err != nil {
 					a.Logger.LogError("Failed to delete S3 bucket", err, map[string]any{
 						"bucket": bucket.BucketName,
 					}, false)
@@ -251,7 +252,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[strin
 	return nil
 }
 
-func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Bucket, checkLifecycle bool, cloudConfig *handlers.CloudConfig) (*orphanS3Bucket, error) {
+func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Bucket, checkLifecycle bool) (*orphanS3Bucket, error) {
 	bucketName := aws.ToString(bucket.Name)
 
 	// Get bucket location first using the default client
@@ -269,8 +270,8 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 
 	// Create a region-specific S3 client for this bucket
 	regionalConfig := &handlers.CloudConfig{
-		AuthMethod: cloudConfig.AuthMethod,
-		Profile:    cloudConfig.Profile,
+		AuthMethod: a.CloudConfig.AuthMethod,
+		Profile:    a.CloudConfig.Profile,
 		Region:     aws.String(region),
 	}
 	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
@@ -343,11 +344,11 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 	}, nil
 }
 
-func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName string, region string, cloudConfig *handlers.CloudConfig) error {
+func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName string, region string) error {
 	// Create a region-specific S3 client
 	regionalConfig := &handlers.CloudConfig{
-		AuthMethod: cloudConfig.AuthMethod,
-		Profile:    cloudConfig.Profile,
+		AuthMethod: a.CloudConfig.AuthMethod,
+		Profile:    a.CloudConfig.Profile,
 		Region:     aws.String(region),
 	}
 	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
@@ -377,11 +378,11 @@ func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName strin
 	return nil
 }
 
-func (a *AWSCommand) deleteS3Bucket(ctx context.Context, bucketName string, region string, cloudConfig *handlers.CloudConfig) error {
+func (a *AWSCommand) deleteS3Bucket(ctx context.Context, bucketName string, region string) error {
 	// Create a region-specific S3 client
 	regionalConfig := &handlers.CloudConfig{
-		AuthMethod: cloudConfig.AuthMethod,
-		Profile:    cloudConfig.Profile,
+		AuthMethod: a.CloudConfig.AuthMethod,
+		Profile:    a.CloudConfig.Profile,
 		Region:     aws.String(region),
 	}
 	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
