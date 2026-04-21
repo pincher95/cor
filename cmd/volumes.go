@@ -26,7 +26,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type volumePipelineResult struct {
+type orphanVolume struct {
 	name, id, snapshotID string
 	size                 int32
 }
@@ -51,7 +51,7 @@ var volumesCmd = &cobra.Command{
 func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
 	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 
-	return runOrphanPipeline(v, ctx, flagValues, OrphanPipeline[types.Volume, volumePipelineResult]{
+	return runOrphanPipeline(v, ctx, flagValues, OrphanPipeline[types.Volume, orphanVolume]{
 		Headers: []string{"Name", "Volume ID", "Snapshot ID", "Size"},
 		List: func(ctx context.Context, emit func(types.Volume) error) error {
 			filters := []types.Filter{
@@ -77,7 +77,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 			}
 			return nil
 		},
-		Process: func(_ context.Context, vol types.Volume) (*volumePipelineResult, error) {
+		Process: func(_ context.Context, vol types.Volume) (*orphanVolume, error) {
 			name := "-"
 			for _, t := range vol.Tags {
 				if aws.ToString(t.Key) == "Name" && t.Value != nil {
@@ -85,24 +85,24 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]
 					break
 				}
 			}
-			return &volumePipelineResult{
+			return &orphanVolume{
 				name:       name,
 				id:         aws.ToString(vol.VolumeId),
 				snapshotID: aws.ToString(vol.SnapshotId),
 				size:       aws.ToInt32(vol.Size),
 			}, nil
 		},
-		ToRow: func(r volumePipelineResult) []any {
+		ToRow: func(r orphanVolume) []any {
 			return []any{r.name, r.id, r.snapshotID, r.size}
 		},
-		Finalize: func(results []volumePipelineResult) []any {
+		Finalize: func(results []orphanVolume) []any {
 			var total int32
 			for _, r := range results {
 				total += r.size
 			}
 			return []any{"Total", "", "", total}
 		},
-		Delete: func(ctx context.Context, r volumePipelineResult) error {
+		Delete: func(ctx context.Context, r orphanVolume) error {
 			v.Logger.LogInfo("Deleting Volume", map[string]any{"VolumeId": r.id})
 			_, err := v.AWSClient.EC2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.id)})
 			return err
