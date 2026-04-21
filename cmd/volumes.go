@@ -18,27 +18,17 @@ package cmd
 import (
 	"context"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
 
-type volumeWithTags struct {
-	Volume types.Volume
-	TagMap map[string]types.Tag
-}
-
-type volumeResult struct {
-	row  table.Row
-	size int32
+type volumePipelineResult struct {
+	name, id, snapshotID string
+	size                 int32
 }
 
 // volumesListCmd represents the volumes command
@@ -59,187 +49,67 @@ var volumesCmd = &cobra.Command{
 }
 
 func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
-	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
-	rootCtx := ctx
-
-	collectDeletes := (*flagValues)["delete"].(bool)
-
-	// Create a channel to process volumes
-	volumeWithTagsChan := make(chan volumeWithTags, 10)
-	resultsChan := make(chan volumeResult, 10)
-
-	// Create an errgroup with context
-	g, egCtx := errgroup.WithContext(ctx)
-
-	// Goroutine to describe volumes
 	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	g.Go(func() error {
-		volumeFilter := []types.Filter{
-			{
-				Name:   aws.String("status"),
-				Values: []string{"available"},
-			},
-		}
-		if filterByName != "" {
-			volumeFilter = append(volumeFilter, types.Filter{
-				Name:   aws.String("tag:Name"),
-				Values: []string{filterByName},
-			})
-		}
-		if err := v.DescribeVolumes(egCtx, volumeWithTagsChan, &volumeFilter); err != nil {
-			return err
-		}
-		return nil
-	})
 
-	// Launch worker goroutines
-	numWorkers := NumGoroutines
-	for range numWorkers {
-		g.Go(func() error {
-			for {
-				select {
-				case <-egCtx.Done():
-					return egCtx.Err()
-				case volume, ok := <-volumeWithTagsChan:
-					if !ok {
-						return nil
-					}
-					processedVolume, err := handleVolume(volume)
-					if err != nil {
+	return runOrphanPipeline(v, ctx, flagValues, OrphanPipeline[types.Volume, volumePipelineResult]{
+		Headers: []string{"Name", "Volume ID", "Snapshot ID", "Size"},
+		List: func(ctx context.Context, emit func(types.Volume) error) error {
+			filters := []types.Filter{
+				{Name: aws.String("status"), Values: []string{"available"}},
+			}
+			if filterByName != "" {
+				filters = append(filters, types.Filter{
+					Name:   aws.String("tag:Name"),
+					Values: []string{filterByName},
+				})
+			}
+			p := ec2.NewDescribeVolumesPaginator(v.AWSClient.EC2, &ec2.DescribeVolumesInput{Filters: filters})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, item := range page.Volumes {
+					if err := emit(item); err != nil {
 						return err
 					}
-					// Safely dereference pointers with nil checks
-					name := "-"
-					if tag, exists := processedVolume.TagMap["Name"]; exists && tag.Value != nil {
-						name = *tag.Value
-					}
-					volID := ""
-					if processedVolume.Volume.VolumeId != nil {
-						volID = *processedVolume.Volume.VolumeId
-					}
-					snapshotID := ""
-					if processedVolume.Volume.SnapshotId != nil {
-						snapshotID = *processedVolume.Volume.SnapshotId
-					}
-					size := int32(0)
-					if processedVolume.Volume.Size != nil {
-						size = *processedVolume.Volume.Size
-					}
-					row := table.Row{name, volID, snapshotID, size}
-					resultsChan <- volumeResult{row: row, size: size}
 				}
 			}
-		})
-	}
-
-	// Result collector goroutine: concurrently reads from resultsChan.
-	resultCollectorDone := make(chan []string, 1)
-	var totalSize int32
-	go func() {
-		stream := printer.NewStreamTable(v.Output, true, []string{"Name", "Volume ID", "Snapshot ID", "Size"})
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
-
-		deleteIDs := make([]string, 0)
-		for res := range resultsChan {
-			stream.WriteRow(res.row...)
-			totalSize += res.size
-
-			if collectDeletes {
-				// row = Name, VolumeId, SnapshotId, Size
-				if len(res.row) < 2 {
-					continue
-				}
-				volID, _ := res.row[1].(string)
-				if volID == "" {
-					continue
-				}
-				deleteIDs = append(deleteIDs, volID)
-			}
-		}
-		stream.WriteRow("Total", "", "", totalSize)
-		stream.Close()
-		resultCollectorDone <- deleteIDs
-	}()
-
-	// Wait for the describer and workers to finish.
-	err := g.Wait()
-
-	// All worker and describer goroutines are done; close the results channel.
-	close(resultsChan)
-	// Wait for the collector to finish.
-	deleteIDs := <-resultCollectorDone
-	if err != nil {
-		v.Logger.LogError("Error during volume processing", err, nil, false)
-		return err
-	}
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
 			return nil
-		}
-		confirm, err := confirmDelete(v.Prompter, v.Logger)
-		if err != nil {
+		},
+		Process: func(_ context.Context, vol types.Volume) (*volumePipelineResult, error) {
+			name := "-"
+			for _, t := range vol.Tags {
+				if aws.ToString(t.Key) == "Name" && t.Value != nil {
+					name = *t.Value
+					break
+				}
+			}
+			return &volumePipelineResult{
+				name:       name,
+				id:         aws.ToString(vol.VolumeId),
+				snapshotID: aws.ToString(vol.SnapshotId),
+				size:       aws.ToInt32(vol.Size),
+			}, nil
+		},
+		ToRow: func(r volumePipelineResult) []any {
+			return []any{r.name, r.id, r.snapshotID, r.size}
+		},
+		Finalize: func(results []volumePipelineResult) []any {
+			var total int32
+			for _, r := range results {
+				total += r.size
+			}
+			return []any{"Total", "", "", total}
+		},
+		Delete: func(ctx context.Context, r volumePipelineResult) error {
+			v.Logger.LogInfo("Deleting Volume", map[string]any{"VolumeId": r.id})
+			_, err := v.AWSClient.EC2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.id)})
 			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, volID := range deleteIDs {
-			v.Logger.LogInfo("Deleting Volume", map[string]any{"VolumeId": volID})
-			if _, err := v.AWSClient.DeleteVolume(rootCtx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volID)}); err != nil {
-				v.Logger.LogError("Error deleting volume", err, map[string]any{"VolumeId": volID}, false)
-				return err
-			}
-		}
-	}
-
-	return nil
+		},
+	})
 }
 
 func init() {
 	volumesCmd.Flags().String("filter-by-name", "", "Filter volumes by tag:Name (empty = no filter).")
-}
-
-// DescribeVolumes describes the volumes based on the filter provided
-func (v *AWSCommand) DescribeVolumes(ctx context.Context, volumeWithTagsChan chan<- volumeWithTags, filters *[]types.Filter) error {
-	defer close(volumeWithTagsChan)
-
-	// If filters are nil, create an empty filter
-	if filters == nil {
-		filters = &[]types.Filter{}
-	}
-
-	// Create a paginator
-	paginator := ec2.NewDescribeVolumesPaginator(v.AWSClient.EC2, &ec2.DescribeVolumesInput{
-		Filters: *filters,
-	})
-
-	// Iterate over the pages
-	for paginator.HasMorePages() {
-		output, err := paginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-
-		// Send volumes to the channel
-		for _, volume := range output.Volumes {
-			tagMap := utils.TagsToMap(volume.Tags)
-			volumeWithTagsChan <- volumeWithTags{Volume: volume, TagMap: tagMap}
-		}
-	}
-
-	return nil
-}
-
-// handleVolume handles the volume and adds a default name if not present
-func handleVolume(volume volumeWithTags) (*volumeWithTags, error) {
-	_, ok := volume.TagMap["Name"]
-	if !ok {
-		volume.TagMap["Name"] = types.Tag{
-			Value: aws.String("-"),
-		}
-	}
-	return &volumeWithTags{
-		Volume: volume.Volume,
-		TagMap: volume.TagMap,
-	}, nil
 }
