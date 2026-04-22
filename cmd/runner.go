@@ -38,11 +38,12 @@ var newConfigFn = handlers.NewConfig
 
 // runResourceCommand handles the boilerplate phase of every resource command:
 // flag retrieval, AWS config resolution, client assembly, and AWSCommand packaging.
-// The execute callback receives the fully assembled AWSCommand plus the flag values
-// and performs the command-specific work. Bind existing methods via Go's
-// method-expression form, e.g. (*AWSCommand).executeVolumes.
+// The execute callback receives the fully assembled AWSCommand plus the typed
+// globals and the per-command extras map, and performs the command-specific
+// work. Bind existing methods via Go's method-expression form, e.g.
+// (*AWSCommand).executeVolumes.
 //
-// The execute callback's argument order — (awsCmd, ctx, flagValues) — is
+// The execute callback's argument order — (awsCmd, ctx, globals, extras) — is
 // load-bearing: do not reorder. The *AWSCommand-first position is required by
 // the method-expression form so bindings like (*AWSCommand).executeVolumes
 // match the parameter type without any change to the 25 existing executeX
@@ -50,20 +51,20 @@ var newConfigFn = handlers.NewConfig
 func runResourceCommand(
 	cmd *cobra.Command,
 	setup CommandSetup,
-	execute func(awsCmd *AWSCommand, ctx context.Context, flagValues *map[string]any) error,
+	execute func(awsCmd *AWSCommand, ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error,
 ) error {
 	ctx := cmd.Context()
 
 	flagRetriever := &flags.CommandFlagRetriever{Cmd: cmd}
-	flagValues, err := flags.GetFlags(flagRetriever, setup.AdditionalFlags)
+	globals, extras, err := flags.GetFlags(flagRetriever, setup.AdditionalFlags)
 	if err != nil {
 		return err
 	}
 
 	cloudConfig := &handlers.CloudConfig{
-		AuthMethod: aws.String((*flagValues)["auth-method"].(string)),
-		Profile:    aws.String((*flagValues)["profile"].(string)),
-		Region:     aws.String((*flagValues)["region"].(string)),
+		AuthMethod: aws.String(globals.AuthMethod),
+		Profile:    aws.String(globals.Profile),
+		Region:     aws.String(globals.Region),
 	}
 	cfg, err := newConfigFn(ctx, *cloudConfig, "UTC", true, true)
 	if err != nil {
@@ -75,7 +76,7 @@ func runResourceCommand(
 		return fmt.Errorf("runResourceCommand: BuildClients returned nil")
 	}
 	awsCmd := newAWSCommand(client, cloudConfig, os.Stdin, os.Stdout)
-	return execute(awsCmd, ctx, flagValues)
+	return execute(awsCmd, ctx, globals, extras)
 }
 
 // newAWSCommand assembles an AWSCommand with the default logger/prompter/output

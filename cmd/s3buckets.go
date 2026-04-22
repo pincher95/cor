@@ -69,12 +69,13 @@ func init() {
 	s3bucketsCmd.Flags().Bool("check-lifecycle", false, "Also flag buckets without lifecycle policies")
 }
 
-func (a *AWSCommand) executeS3Buckets(ctx context.Context, flagValues *map[string]any) error {
-	checkLifecycle := (*flagValues)["check-lifecycle"].(bool)
+func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	checkLifecycle := (*extras)["check-lifecycle"].(bool)
 
-	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[s3types.Bucket, orphanS3Bucket]{
-		Headers:   []string{"Bucket Name", "Region", "Created", "Empty", "Incomplete Uploads", "Has Lifecycle", "Reason"},
-		HideIndex: true,
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[s3types.Bucket, orphanS3Bucket]{
+		Headers:       []string{"Bucket Name", "Region", "Created", "Empty", "Incomplete Uploads", "Has Lifecycle", "Reason"},
+		ResourceLabel: "S3 buckets",
+		HideIndex:     true,
 		List: func(ctx context.Context, emit func(s3types.Bucket) error) error {
 			out, err := a.AWSClient.S3.ListBuckets(ctx, &s3.ListBucketsInput{})
 			if err != nil {

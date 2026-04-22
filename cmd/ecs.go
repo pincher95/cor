@@ -65,10 +65,11 @@ func init() {
 	// No additional flags for ECS command
 }
 
-func (a *AWSCommand) executeECS(ctx context.Context, flagValues *map[string]any) error {
-	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanECSCluster]{
-		Headers:   []string{"Cluster Name", "Status", "Registered Tasks", "Running Tasks", "Services", "Reason"},
-		HideIndex: true,
+func (a *AWSCommand) executeECS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[string, orphanECSCluster]{
+		Headers:       []string{"Cluster Name", "Status", "Registered Tasks", "Running Tasks", "Services", "Reason"},
+		ResourceLabel: "ECS clusters",
+		HideIndex:     true,
 		List: func(ctx context.Context, emit func(string) error) error {
 			p := ecs.NewListClustersPaginator(a.AWSClient.ECS, &ecs.ListClustersInput{})
 			for p.HasMorePages() {

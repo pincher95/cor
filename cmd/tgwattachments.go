@@ -53,15 +53,15 @@ func init() {
 	tgwAttachmentsCmd.Flags().String("filter-by-resource", "", "Filter by resource ID (substring match).")
 }
 
-func (t *AWSCommand) executeTGWAttachments(ctx context.Context, flagValues *map[string]any) error {
+func (t *AWSCommand) executeTGWAttachments(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
-	includeAssociated := (*flagValues)["include-associated"].(bool)
-	includeNonVPC := (*flagValues)["include-non-vpc"].(bool)
-	filterByResource := normalizeFilterValue((*flagValues)["filter-by-resource"].(string))
+	collectDeletes := globals.Delete
+	includeAssociated := (*extras)["include-associated"].(bool)
+	includeNonVPC := (*extras)["include-non-vpc"].(bool)
+	filterByResource := normalizeFilterValue((*extras)["filter-by-resource"].(string))
 
 	stream := printer.NewStreamTable(t.Output, true, []string{"Attachment ID", "ResourceType", "ResourceId", "State", "AssocState"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteIDs := make([]string, 0)

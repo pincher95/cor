@@ -56,11 +56,12 @@ type orphanNatGateway struct {
 	created string
 }
 
-func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[string]any) error {
-	stateFilter := (*flagValues)["filter-by-state"].(string)
+func (c *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	stateFilter := (*extras)["filter-by-state"].(string)
 
-	return runOrphanPipeline(c, ctx, flagValues, OrphanPipeline[types.NatGateway, orphanNatGateway]{
-		Headers: []string{"Name", "ID", "State", "VPC", "Subnet", "Created"},
+	return runOrphanPipeline(c, ctx, globals, extras, OrphanPipeline[types.NatGateway, orphanNatGateway]{
+		Headers:       []string{"Name", "ID", "State", "VPC", "Subnet", "Created"},
+		ResourceLabel: "NAT Gateways",
 		List: func(ctx context.Context, emit func(types.NatGateway) error) error {
 			filters := []types.Filter{}
 			if stateFilter != "" {

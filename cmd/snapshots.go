@@ -46,8 +46,8 @@ var snapshotsCmd = &cobra.Command{
 	},
 }
 
-func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string]any) error {
-	collectDeletes := (*flagValues)["delete"].(bool)
+func (s *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	collectDeletes := globals.Delete
 	type snapshotDeleteCandidate struct {
 		id   string
 		name string
@@ -76,11 +76,11 @@ func (s *AWSCommand) executeSnapShot(ctx context.Context, flagValues *map[string
 
 	// Stream output
 	stream := printer.NewStreamTable(s.Output, true, []string{"Name", "Snapshot ID", "Size"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	var totalSize int32
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 	snapFilters := []types.Filter{}
 	if filterByName != "" {
 		snapFilters = append(snapFilters, types.Filter{Name: aws.String("tag:Name"), Values: []string{filterByName}})

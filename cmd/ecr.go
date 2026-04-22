@@ -57,12 +57,12 @@ func init() {
 	ecrCmd.Flags().String("older-than-days", "", "Include images older than N days (e.g. 30).")
 }
 
-func (e *AWSCommand) executeECR(ctx context.Context, flagValues *map[string]any) error {
+func (e *AWSCommand) executeECR(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	untaggedOnly := (*flagValues)["untagged-only"].(bool)
-	olderThanDaysStr := strings.TrimSpace((*flagValues)["older-than-days"].(string))
+	collectDeletes := globals.Delete
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	untaggedOnly := (*extras)["untagged-only"].(bool)
+	olderThanDaysStr := strings.TrimSpace((*extras)["older-than-days"].(string))
 
 	var cutoff time.Time
 	if olderThanDaysStr != "" {
@@ -76,7 +76,7 @@ func (e *AWSCommand) executeECR(ctx context.Context, flagValues *map[string]any)
 	}
 
 	stream := printer.NewStreamTable(e.Output, true, []string{"Repository", "ImageDigest", "Tags", "PushedAt"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteMap := make(map[string][]ecrtypes.ImageIdentifier)

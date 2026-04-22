@@ -48,11 +48,12 @@ var volumesCmd = &cobra.Command{
 	},
 }
 
-func (v *AWSCommand) executeVolumes(ctx context.Context, flagValues *map[string]any) error {
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+func (v *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
-	return runOrphanPipeline(v, ctx, flagValues, OrphanPipeline[types.Volume, orphanVolume]{
-		Headers: []string{"Name", "Volume ID", "Snapshot ID", "Size"},
+	return runOrphanPipeline(v, ctx, globals, extras, OrphanPipeline[types.Volume, orphanVolume]{
+		Headers:       []string{"Name", "Volume ID", "Snapshot ID", "Size"},
+		ResourceLabel: "EBS volumes",
 		List: func(ctx context.Context, emit func(types.Volume) error) error {
 			filters := []types.Filter{
 				{Name: aws.String("status"), Values: []string{"available"}},

@@ -51,14 +51,14 @@ func init() {
 	efsCmd.Flags().Bool("include-attached", false, "Include file systems that have mount targets (default: show only orphans).")
 }
 
-func (e *AWSCommand) executeEFS(ctx context.Context, flagValues *map[string]any) error {
+func (e *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
-	includeAttached := (*flagValues)["include-attached"].(bool)
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	collectDeletes := globals.Delete
+	includeAttached := (*extras)["include-attached"].(bool)
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
 	stream := printer.NewStreamTable(e.Output, true, []string{"Name", "FileSystem ID", "MountTargets", "SizeBytes", "LifecycleState"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteIDs := make([]string, 0)

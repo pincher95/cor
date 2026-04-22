@@ -51,14 +51,14 @@ func init() {
 	clientVPNCmd.Flags().Bool("include-active", false, "Include endpoints with active connections.")
 }
 
-func (c *AWSCommand) executeClientVPN(ctx context.Context, flagValues *map[string]any) error {
+func (c *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	includeActive := (*flagValues)["include-active"].(bool)
+	collectDeletes := globals.Delete
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	includeActive := (*extras)["include-active"].(bool)
 
 	stream := printer.NewStreamTable(c.Output, true, []string{"Endpoint ID", "Description", "Status", "ActiveConnections"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteIDs := make([]string, 0)

@@ -55,18 +55,18 @@ var elbv1Cmd = &cobra.Command{
 	},
 }
 
-func (e *AWSCommand) executeElbv1(ctx context.Context, flagValues *map[string]any) error {
-	collectDeletes := (*flagValues)["delete"].(bool)
+func (e *AWSCommand) executeElbv1(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	collectDeletes := globals.Delete
 
 	var wg sync.WaitGroup
 	loadBalancerChan := make(chan types.LoadBalancerDescription, 100)
 	tableRowChan := make(chan elbv1Result, 100)
 	errorChan := make(chan error, 1)
 
-	showUnhealthy := (*flagValues)["show-unhealthy"].(bool)
-	showTags := (*flagValues)["show-tags"].(bool)
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	tagFilters := parseTagFilters((*flagValues)["filter-by-tags"].(string))
+	showUnhealthy := (*extras)["show-unhealthy"].(bool)
+	showTags := (*extras)["show-tags"].(bool)
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	tagFilters := parseTagFilters((*extras)["filter-by-tags"].(string))
 
 	headers := []string{"LoadBalancer Name", "number of listeners", "targets without instances"}
 	if showUnhealthy {
@@ -77,7 +77,7 @@ func (e *AWSCommand) executeElbv1(ctx context.Context, flagValues *map[string]an
 		headers = append(headers, "Tags")
 	}
 	stream := printer.NewStreamTable(e.Output, true, headers)
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	wg.Go(func() {

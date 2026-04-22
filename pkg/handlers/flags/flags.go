@@ -23,6 +23,18 @@ import (
 	"github.com/spf13/viper"
 )
 
+// GlobalFlags holds the six root-level flags that every command shares.
+// Commands read them directly from this struct; the extras map returned
+// alongside holds only per-command flags.
+type GlobalFlags struct {
+	Region     string
+	Profile    string
+	AuthMethod string
+	Delete     bool
+	SortBy     string
+	SortDesc   bool
+}
+
 // FlagRetriever defines an interface for retrieving flags.
 type FlagRetriever interface {
 	GetString(name string) (string, error)
@@ -84,48 +96,73 @@ func (r *CommandFlagRetriever) IsChanged(name string) bool {
 	return r.Cmd.Flags().Changed(name) || r.Cmd.InheritedFlags().Changed(name) || r.Cmd.PersistentFlags().Changed(name)
 }
 
-func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*map[string]any, error) {
-	baseFlags := []Flag{
-		{Name: "region", Type: "string"},
-		{Name: "auth-method", Type: "string"},
-		{Name: "profile", Type: "string"},
-		{Name: "delete", Type: "bool"},
-		{Name: "sort-by", Type: "string"},
-		{Name: "sort-desc", Type: "bool"},
+// GetFlags resolves the six baseline global flags into a typed *GlobalFlags
+// and the caller-supplied additional flags into a *map[string]any (extras).
+// Precedence for every value is CLI > viper (config file + env) > defaults —
+// unchanged from the pre-typed version.
+func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*GlobalFlags, *map[string]any, error) {
+	getString := func(name string) (string, error) {
+		if !flagRetriever.IsChanged(name) && viper.IsSet(name) {
+			return viper.GetString(name), nil
+		}
+		return flagRetriever.GetString(name)
+	}
+	getBool := func(name string) (bool, error) {
+		if !flagRetriever.IsChanged(name) && viper.IsSet(name) {
+			return viper.GetBool(name), nil
+		}
+		return flagRetriever.GetBool(name)
 	}
 
-	allFlags := append(baseFlags, additionalFlags...)
-	results := make(map[string]any, len(allFlags))
+	globals := &GlobalFlags{}
+	var err error
+	if globals.Region, err = getString("region"); err != nil {
+		return nil, nil, err
+	}
+	if globals.Profile, err = getString("profile"); err != nil {
+		return nil, nil, err
+	}
+	if globals.AuthMethod, err = getString("auth-method"); err != nil {
+		return nil, nil, err
+	}
+	if globals.Delete, err = getBool("delete"); err != nil {
+		return nil, nil, err
+	}
+	if globals.SortBy, err = getString("sort-by"); err != nil {
+		return nil, nil, err
+	}
+	if globals.SortDesc, err = getBool("sort-desc"); err != nil {
+		return nil, nil, err
+	}
 
-	for _, flag := range allFlags {
-		var err error
-		switch flag.Type {
+	extras := make(map[string]any, len(additionalFlags))
+	for _, f := range additionalFlags {
+		switch f.Type {
 		case "string":
-			// Precedence: CLI > config/env (viper) > defaults
-			if !flagRetriever.IsChanged(flag.Name) && viper.IsSet(flag.Name) {
-				results[flag.Name] = viper.GetString(flag.Name)
-				break
+			v, err := getString(f.Name)
+			if err != nil {
+				return nil, nil, err
 			}
-			results[flag.Name], err = flagRetriever.GetString(flag.Name)
+			extras[f.Name] = v
 		case "bool":
-			if !flagRetriever.IsChanged(flag.Name) && viper.IsSet(flag.Name) {
-				results[flag.Name] = viper.GetBool(flag.Name)
-				break
+			v, err := getBool(f.Name)
+			if err != nil {
+				return nil, nil, err
 			}
-			results[flag.Name], err = flagRetriever.GetBool(flag.Name)
+			extras[f.Name] = v
 		case "int":
-			if !flagRetriever.IsChanged(flag.Name) && viper.IsSet(flag.Name) {
-				results[flag.Name] = viper.GetInt(flag.Name)
-				break
+			if !flagRetriever.IsChanged(f.Name) && viper.IsSet(f.Name) {
+				extras[f.Name] = viper.GetInt(f.Name)
+				continue
 			}
-			results[flag.Name], err = flagRetriever.GetInt(flag.Name)
+			v, err := flagRetriever.GetInt(f.Name)
+			if err != nil {
+				return nil, nil, err
+			}
+			extras[f.Name] = v
 		default:
-			err = fmt.Errorf("unsupported flag type: %s", flag.Type)
-		}
-		if err != nil {
-			return nil, err
+			return nil, nil, fmt.Errorf("unsupported flag type: %s", f.Type)
 		}
 	}
-
-	return &results, nil
+	return globals, &extras, nil
 }

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/viper"
@@ -42,17 +43,21 @@ func newTestAWSCommand(out *bytes.Buffer, promp prompter.Client) *AWSCommand {
 	}
 }
 
-// baseFlagValues returns a flagValues map with the six global flags populated
-// with sensible test defaults. Tests mutate individual keys as needed.
-func baseFlagValues(delete bool) *map[string]any {
-	m := map[string]any{
-		"region":      "us-east-1",
-		"profile":     "default",
-		"auth-method": "AWS_CREDENTIALS_FILE",
-		"delete":      delete,
-		"sort-by":     "",
-		"sort-desc":   false,
+// baseGlobals returns a *flags.GlobalFlags with sensible test defaults.
+func baseGlobals(delete bool) *flags.GlobalFlags {
+	return &flags.GlobalFlags{
+		Region:     "us-east-1",
+		Profile:    "default",
+		AuthMethod: "AWS_CREDENTIALS_FILE",
+		Delete:     delete,
+		SortBy:     "",
+		SortDesc:   false,
 	}
+}
+
+// baseExtras returns an empty extras map.
+func baseExtras() *map[string]any {
+	m := map[string]any{}
 	return &m
 }
 
@@ -66,8 +71,9 @@ func TestRunOrphanPipeline_HappyPath_StreamsAllRows(t *testing.T) {
 
 	var finalizeCalled bool
 
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(false), OrphanPipeline[int, string]{
-		Headers: []string{"Index", "Value"},
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(false), baseExtras(), OrphanPipeline[int, string]{
+		Headers:       []string{"Index", "Value"},
+		ResourceLabel: "test items",
 		List: func(ctx context.Context, emit func(int) error) error {
 			for i := 1; i <= 3; i++ {
 				if err := emit(i); err != nil {
@@ -113,7 +119,7 @@ func TestRunOrphanPipeline_DeleteCalledWhenConfirmed(t *testing.T) {
 
 	var deletes int
 
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(true), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(true), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			for _, i := range []int{10, 20, 30} {
@@ -148,7 +154,7 @@ func TestRunOrphanPipeline_DeleteNotCalledWhenFlagFalse(t *testing.T) {
 
 	var deletes int
 
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(false), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(false), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			return emit(1)
@@ -175,7 +181,7 @@ func TestRunOrphanPipeline_ProcessNilSkipsItem(t *testing.T) {
 
 	var rows int
 
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(false), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(false), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			for i := 1; i <= 4; i++ {
@@ -210,7 +216,7 @@ func TestRunOrphanPipeline_ListErrorAborts(t *testing.T) {
 	awsCmd := newTestAWSCommand(out, &fakePrompter{answer: false})
 
 	sentinel := errors.New("list boom")
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(false), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(false), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			return sentinel
@@ -234,7 +240,7 @@ func TestRunOrphanPipeline_ProcessErrorAborts(t *testing.T) {
 	awsCmd := newTestAWSCommand(out, &fakePrompter{answer: false})
 
 	sentinel := errors.New("process boom")
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(false), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(false), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			// Emit many items; Process will fail on one of them.
@@ -268,7 +274,7 @@ func TestRunOrphanPipeline_DeleteErrorAborts(t *testing.T) {
 
 	sentinel := errors.New("delete boom")
 	var deletes int
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(true), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(true), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			for _, i := range make([]int, 3) {
@@ -313,7 +319,7 @@ func TestRunOrphanPipeline_DeleteReceivesRootContext(t *testing.T) {
 	awsCmd := newTestAWSCommand(out, &fakePrompter{answer: true})
 
 	var deleteCtxErrs []error
-	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(true), OrphanPipeline[int, int]{
+	err := runOrphanPipeline(awsCmd, context.Background(), baseGlobals(true), baseExtras(), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			return emit(42)
