@@ -111,11 +111,7 @@ func init() {
 }
 
 func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any) error {
-	cache := &awsNameCache{
-		vpcs:    make(map[string]string),
-		subnets: make(map[string]string),
-		sgs:     make(map[string]string),
-	}
+	cache := newAWSNameCache()
 
 	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 	filterByENIs := mergeCSV(flagValues, "filter-by-enis", "filter-by-id-or-name")

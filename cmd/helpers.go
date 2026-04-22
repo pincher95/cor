@@ -166,13 +166,23 @@ func formatElbTags(tags map[string]string) string {
 // keyed by VPC ID, subnet ID, and security-group ID. It eliminates
 // duplicate Describe* calls when many items share the same VPC/subnet/SG.
 //
-// The three maps are independent. A caller that only populates one map
-// (e.g. only subnet names) pays no cost on the other two.
+// Construct with newAWSNameCache() — the three maps must be non-nil before
+// use (writes to a nil map panic).
 type awsNameCache struct {
 	mu      sync.RWMutex
 	vpcs    map[string]string
 	subnets map[string]string
 	sgs     map[string]string
+}
+
+// newAWSNameCache returns a ready-to-use awsNameCache with all three maps
+// initialized to empty.
+func newAWSNameCache() *awsNameCache {
+	return &awsNameCache{
+		vpcs:    map[string]string{},
+		subnets: map[string]string{},
+		sgs:     map[string]string{},
+	}
 }
 
 // splitCSV splits a comma-separated filter value into trimmed, non-empty
