@@ -126,7 +126,8 @@ func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any
 	}
 
 	return runOrphanPipeline(e, ctx, flagValues, OrphanPipeline[types.NetworkInterface, orphanENI]{
-		Headers: []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC", "Subnet", "Private IP", "Security Groups"},
+		Headers:       []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC", "Subnet", "Private IP", "Security Groups"},
+		ResourceLabel: "ENIs",
 		List: func(ctx context.Context, emit func(types.NetworkInterface) error) error {
 			baseFilters := []types.Filter{
 				{Name: aws.String("status"), Values: []string{"available"}},

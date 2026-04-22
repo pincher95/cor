@@ -12,6 +12,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pincher95/cor/pkg/handlers/printer"
 	"golang.org/x/sync/errgroup"
@@ -29,6 +30,12 @@ import (
 // --delete for this command; nil makes --delete a no-op).
 type OrphanPipeline[Item, Result any] struct {
 	Headers []string
+
+	// ResourceLabel is the plural human-readable name of the resource type
+	// (e.g. "Lambda functions", "ENIs"). When non-empty, runOrphanPipeline
+	// emits "Found %d orphaned <ResourceLabel>" via Logger.LogInfo after
+	// streaming all rows and before the delete phase.
+	ResourceLabel string
 
 	// HideIndex suppresses the leading "#" index column. Default false
 	// (index column shown). Commands that predate this helper's
@@ -149,6 +156,10 @@ func runOrphanPipeline[Item, Result any](
 	<-collectorDone
 	if err != nil {
 		return err
+	}
+
+	if spec.ResourceLabel != "" {
+		a.Logger.LogInfo(fmt.Sprintf("Found %d orphaned %s", len(collected), spec.ResourceLabel), nil)
 	}
 
 	if !collectDeletes || len(collected) == 0 {

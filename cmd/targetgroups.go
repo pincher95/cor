@@ -65,7 +65,8 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[st
 	includeAttached := (*flagValues)["include-attached"].(bool)
 
 	return runOrphanPipeline(t, ctx, flagValues, OrphanPipeline[elbtypes.TargetGroup, orphanTargetGroup]{
-		Headers: []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"},
+		Headers:       []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"},
+		ResourceLabel: "target groups",
 		List: func(ctx context.Context, emit func(elbtypes.TargetGroup) error) error {
 			p := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(t.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{})
 			for p.HasMorePages() {

@@ -77,8 +77,9 @@ func (a *AWSCommand) executeElastiCache(ctx context.Context, flagValues *map[str
 	hoursZeroConnections := int64((*flagValues)["hours-zero-connections"].(int))
 
 	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[elasticachetypes.CacheCluster, orphanElastiCacheCluster]{
-		Headers:   []string{"Cluster ID", "Engine", "Node Type", "Nodes", "Status", "Created", "Days Since Activity", "Reason"},
-		HideIndex: true,
+		Headers:       []string{"Cluster ID", "Engine", "Node Type", "Nodes", "Status", "Created", "Days Since Activity", "Reason"},
+		ResourceLabel: "ElastiCache clusters",
+		HideIndex:     true,
 		List: func(ctx context.Context, emit func(elasticachetypes.CacheCluster) error) error {
 			p := elasticache.NewDescribeCacheClustersPaginator(a.AWSClient.ElastiCache, &elasticache.DescribeCacheClustersInput{})
 			for p.HasMorePages() {

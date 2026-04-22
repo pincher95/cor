@@ -83,8 +83,9 @@ func (a *AWSCommand) executeOpenSearch(ctx context.Context, flagValues *map[stri
 	hoursNoSearches := int64((*flagValues)["hours-no-searches"].(int))
 
 	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanOpenSearchDomain]{
-		Headers:   []string{"Domain Name", "Version", "Instance Type", "Instances", "Storage", "Created", "Days Since Activity", "Reason"},
-		HideIndex: true,
+		Headers:       []string{"Domain Name", "Version", "Instance Type", "Instances", "Storage", "Created", "Days Since Activity", "Reason"},
+		ResourceLabel: "OpenSearch domains",
+		HideIndex:     true,
 		List: func(ctx context.Context, emit func(string) error) error {
 			out, err := a.AWSClient.OpenSearch.ListDomainNames(ctx, &opensearch.ListDomainNamesInput{})
 			if err != nil {

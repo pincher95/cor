@@ -56,7 +56,8 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[stri
 	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
 
 	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[types.Address, orphanElasticIP]{
-		Headers: []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"},
+		Headers:       []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"},
+		ResourceLabel: "Elastic IPs",
 		List: func(ctx context.Context, emit func(types.Address) error) error {
 			filters := []types.Filter{}
 			if filterByName != "" {

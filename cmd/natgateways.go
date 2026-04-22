@@ -60,7 +60,8 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, flagValues *map[str
 	stateFilter := (*flagValues)["filter-by-state"].(string)
 
 	return runOrphanPipeline(c, ctx, flagValues, OrphanPipeline[types.NatGateway, orphanNatGateway]{
-		Headers: []string{"Name", "ID", "State", "VPC", "Subnet", "Created"},
+		Headers:       []string{"Name", "ID", "State", "VPC", "Subnet", "Created"},
+		ResourceLabel: "NAT Gateways",
 		List: func(ctx context.Context, emit func(types.NatGateway) error) error {
 			filters := []types.Filter{}
 			if stateFilter != "" {

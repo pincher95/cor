@@ -78,8 +78,9 @@ func (a *AWSCommand) executeDynamoDB(ctx context.Context, flagValues *map[string
 	daysNoActivity := int64((*flagValues)["days-no-activity"].(int))
 
 	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanDynamoDBTable]{
-		Headers:   []string{"Table Name", "Billing Mode", "Status", "Items", "Size", "Read Capacity", "Write Capacity", "Days No Activity", "Reason"},
-		HideIndex: true,
+		Headers:       []string{"Table Name", "Billing Mode", "Status", "Items", "Size", "Read Capacity", "Write Capacity", "Days No Activity", "Reason"},
+		ResourceLabel: "DynamoDB tables",
+		HideIndex:     true,
 		List: func(ctx context.Context, emit func(string) error) error {
 			p := dynamodb.NewListTablesPaginator(a.AWSClient.DynamoDB, &dynamodb.ListTablesInput{})
 			for p.HasMorePages() {

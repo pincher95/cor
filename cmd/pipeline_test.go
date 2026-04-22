@@ -67,7 +67,8 @@ func TestRunOrphanPipeline_HappyPath_StreamsAllRows(t *testing.T) {
 	var finalizeCalled bool
 
 	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(false), OrphanPipeline[int, string]{
-		Headers: []string{"Index", "Value"},
+		Headers:       []string{"Index", "Value"},
+		ResourceLabel: "test items",
 		List: func(ctx context.Context, emit func(int) error) error {
 			for i := 1; i <= 3; i++ {
 				if err := emit(i); err != nil {

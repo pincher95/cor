@@ -80,8 +80,9 @@ func (a *AWSCommand) executeLambda(ctx context.Context, flagValues *map[string]a
 	minOldVersions := int32((*flagValues)["min-old-versions"].(int))
 
 	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[lambdatypes.FunctionConfiguration, orphanLambdaFunction]{
-		Headers:   []string{"Function Name", "Runtime", "Memory", "Last Modified", "Days Since Invocation", "Versions", "Provisioned Concurrency", "Reason"},
-		HideIndex: true,
+		Headers:       []string{"Function Name", "Runtime", "Memory", "Last Modified", "Days Since Invocation", "Versions", "Provisioned Concurrency", "Reason"},
+		ResourceLabel: "Lambda functions",
+		HideIndex:     true,
 		List: func(ctx context.Context, emit func(lambdatypes.FunctionConfiguration) error) error {
 			p := lambda.NewListFunctionsPaginator(a.AWSClient.Lambda, &lambda.ListFunctionsInput{})
 			for p.HasMorePages() {
