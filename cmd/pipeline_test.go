@@ -238,7 +238,7 @@ func TestRunOrphanPipeline_ProcessErrorAborts(t *testing.T) {
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
 			// Emit many items; Process will fail on one of them.
-			for i := 0; i < 50; i++ {
+			for i := range make([]int, 50) {
 				if err := emit(i); err != nil {
 					return err
 				}
@@ -271,7 +271,7 @@ func TestRunOrphanPipeline_DeleteErrorAborts(t *testing.T) {
 	err := runOrphanPipeline(awsCmd, context.Background(), baseFlagValues(true), OrphanPipeline[int, int]{
 		Headers: []string{"Value"},
 		List: func(ctx context.Context, emit func(int) error) error {
-			for _, i := range []int{1, 2, 3} {
+			for _, i := range make([]int, 3) {
 				if err := emit(i); err != nil {
 					return err
 				}
