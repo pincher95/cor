@@ -50,7 +50,7 @@ Conventional-commits enforced via `@commitlint/config-conventional` (see `.openc
 Every `cmd/*.go` follows this exact skeleton — match it when adding a resource:
 
 1. `RunE` builds: `prompter`, `ctx := cmd.Context()`, `flags.GetFlags(flagRetriever, additionalFlags)`, `handlers.NewConfig(...)`, per-service clients attached to a minimal `&handlers.AWSClientImpl{...}`, then calls a `run<Resource>Cmd` helper.
-2. `run<Resource>Cmd` wraps client/logger/prompter/output into an `AWSCommand` and delegates to `(*AWSCommand).execute<Resource>(ctx, flagValues)`.
+2. `run<Resource>Cmd` wraps client/logger/prompter/output into an `AWSCommand` and delegates to `(*AWSCommand).execute<Resource>(ctx, globals, extras)` where `globals` is `*flags.GlobalFlags` and `extras` is the per-command flag map from `flags.GetFlags`.
 3. `execute<Resource>` runs the producer→workers→collector pattern (below), then the delete phase.
 
 See `cmd/volumes.go` and `cmd/autoscaling.go` as canonical references.
