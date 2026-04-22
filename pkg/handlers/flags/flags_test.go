@@ -48,16 +48,15 @@ func TestGetFlags_ViperFallbackWhenNotChanged(t *testing.T) {
 		changed: map[string]bool{}, // nothing explicitly set on CLI
 	}
 
-	got, err := GetFlags(r, nil)
+	globals, _, err := GetFlags(r, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if (*got)["region"].(string) != "us-west-2" {
-		t.Fatalf("expected region from viper, got %q", (*got)["region"])
+	if globals.Region != "us-west-2" {
+		t.Fatalf("expected region from viper, got %q", globals.Region)
 	}
-	if (*got)["delete"].(bool) != true {
-		t.Fatalf("expected delete from viper, got %v", (*got)["delete"])
+	if globals.Delete != true {
+		t.Fatalf("expected delete from viper, got %v", globals.Delete)
 	}
 }
 
@@ -73,13 +72,12 @@ func TestGetFlags_CLIWinsOverViper(t *testing.T) {
 		changed: map[string]bool{"profile": true}, // explicitly set on CLI
 	}
 
-	got, err := GetFlags(r, nil)
+	globals, _, err := GetFlags(r, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if (*got)["profile"].(string) != "from-cli" {
-		t.Fatalf("expected profile from CLI, got %q", (*got)["profile"])
+	if globals.Profile != "from-cli" {
+		t.Fatalf("expected profile from CLI, got %q", globals.Profile)
 	}
 }
 
@@ -94,17 +92,73 @@ func TestGetFlags_AdditionalFlagsAndUnsupportedType(t *testing.T) {
 	}
 
 	// additional string flag
-	got, err := GetFlags(r, []Flag{{Name: "filter-by-name", Type: "string"}})
+	_, extras, err := GetFlags(r, []Flag{{Name: "filter-by-name", Type: "string"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if (*got)["filter-by-name"].(string) != "abc" {
-		t.Fatalf("expected additional flag, got %q", (*got)["filter-by-name"])
+	if (*extras)["filter-by-name"].(string) != "abc" {
+		t.Fatalf("expected additional flag, got %q", (*extras)["filter-by-name"])
 	}
 
 	// unsupported type
-	_, err = GetFlags(r, []Flag{{Name: "x", Type: "float"}})
+	_, _, err = GetFlags(r, []Flag{{Name: "x", Type: "float"}})
 	if err == nil {
 		t.Fatalf("expected error for unsupported type")
+	}
+}
+
+func TestGetFlags_ReturnsTypedGlobals(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	r := &fakeRetriever{
+		strings: map[string]string{
+			"region":         "us-west-2",
+			"profile":        "prod",
+			"auth-method":    "ENV_SECRET",
+			"sort-by":        "Name",
+			"filter-by-name": "x",
+		},
+		bools: map[string]bool{
+			"delete":    true,
+			"sort-desc": true,
+		},
+		changed: map[string]bool{
+			"region": true, "profile": true, "auth-method": true,
+			"delete": true, "sort-by": true, "sort-desc": true,
+			"filter-by-name": true,
+		},
+	}
+
+	globals, extras, err := GetFlags(r, []Flag{{Name: "filter-by-name", Type: "string"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if globals.Region != "us-west-2" {
+		t.Errorf("Region: expected us-west-2, got %q", globals.Region)
+	}
+	if globals.Profile != "prod" {
+		t.Errorf("Profile: expected prod, got %q", globals.Profile)
+	}
+	if globals.AuthMethod != "ENV_SECRET" {
+		t.Errorf("AuthMethod: expected ENV_SECRET, got %q", globals.AuthMethod)
+	}
+	if !globals.Delete {
+		t.Error("Delete: expected true")
+	}
+	if globals.SortBy != "Name" {
+		t.Errorf("SortBy: expected Name, got %q", globals.SortBy)
+	}
+	if !globals.SortDesc {
+		t.Error("SortDesc: expected true")
+	}
+	if _, ok := (*extras)["region"]; ok {
+		t.Error("extras should not contain global 'region'")
+	}
+	if _, ok := (*extras)["filter-by-name"]; !ok {
+		t.Error("extras should contain additional 'filter-by-name'")
+	}
+	if (*extras)["filter-by-name"].(string) != "x" {
+		t.Errorf("extras[filter-by-name]: expected x, got %q", (*extras)["filter-by-name"])
 	}
 }

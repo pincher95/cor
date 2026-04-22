@@ -60,11 +60,11 @@ func init() {
 	targetgroupsCmd.Flags().Bool("include-attached", false, "Include target groups attached to load balancers (default: show only orphans).")
 }
 
-func (t *AWSCommand) executeTargetGroups(ctx context.Context, flagValues *map[string]any) error {
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	includeAttached := (*flagValues)["include-attached"].(bool)
+func (t *AWSCommand) executeTargetGroups(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	includeAttached := (*extras)["include-attached"].(bool)
 
-	return runOrphanPipeline(t, ctx, flagValues, OrphanPipeline[elbtypes.TargetGroup, orphanTargetGroup]{
+	return runOrphanPipeline(t, ctx, globals, extras, OrphanPipeline[elbtypes.TargetGroup, orphanTargetGroup]{
 		Headers:       []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"},
 		ResourceLabel: "target groups",
 		List: func(ctx context.Context, emit func(elbtypes.TargetGroup) error) error {

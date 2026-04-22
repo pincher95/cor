@@ -78,11 +78,11 @@ func init() {
 	opensearchCmd.Flags().Int("hours-no-searches", 24, "Consider domains orphaned if no searches for this many hours")
 }
 
-func (a *AWSCommand) executeOpenSearch(ctx context.Context, flagValues *map[string]any) error {
-	daysNoIndexing := int64((*flagValues)["days-no-indexing"].(int))
-	hoursNoSearches := int64((*flagValues)["hours-no-searches"].(int))
+func (a *AWSCommand) executeOpenSearch(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	daysNoIndexing := int64((*extras)["days-no-indexing"].(int))
+	hoursNoSearches := int64((*extras)["hours-no-searches"].(int))
 
-	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[string, orphanOpenSearchDomain]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[string, orphanOpenSearchDomain]{
 		Headers:       []string{"Domain Name", "Version", "Instance Type", "Instances", "Storage", "Created", "Days Since Activity", "Reason"},
 		ResourceLabel: "OpenSearch domains",
 		HideIndex:     true,

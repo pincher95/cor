@@ -51,14 +51,14 @@ func init() {
 	vpnConnectionsCmd.Flags().Bool("include-up", false, "Include VPN connections with tunnels up.")
 }
 
-func (v *AWSCommand) executeVPNConnections(ctx context.Context, flagValues *map[string]any) error {
+func (v *AWSCommand) executeVPNConnections(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
-	filterByID := normalizeFilterValue((*flagValues)["filter-by-id"].(string))
-	includeUp := (*flagValues)["include-up"].(bool)
+	collectDeletes := globals.Delete
+	filterByID := normalizeFilterValue((*extras)["filter-by-id"].(string))
+	includeUp := (*extras)["include-up"].(bool)
 
 	stream := printer.NewStreamTable(v.Output, true, []string{"VPN ID", "State", "Gateway", "TunnelsUp"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteIDs := make([]string, 0)

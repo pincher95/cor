@@ -209,8 +209,8 @@ func splitCSV(raw string) []string {
 }
 
 // getFlagString returns the string value for the given flag name, or "".
-func getFlagString(flagValues *map[string]any, name string) string {
-	if v, ok := (*flagValues)[name].(string); ok {
+func getFlagString(extras *map[string]any, name string) string {
+	if v, ok := (*extras)[name].(string); ok {
 		return v
 	}
 	return ""
@@ -218,11 +218,11 @@ func getFlagString(flagValues *map[string]any, name string) string {
 
 // mergeCSV unions CSV tokens from the named flags, preserving first-seen
 // order and dropping duplicates.
-func mergeCSV(flagValues *map[string]any, names ...string) []string {
+func mergeCSV(extras *map[string]any, names ...string) []string {
 	seen := make(map[string]struct{}, 8)
 	out := make([]string, 0)
 	for _, n := range names {
-		for _, v := range splitCSV(getFlagString(flagValues, n)) {
+		for _, v := range splitCSV(getFlagString(extras, n)) {
 			if _, ok := seen[v]; ok {
 				continue
 			}

@@ -46,17 +46,17 @@ var autoscalingCmd = &cobra.Command{
 	},
 }
 
-func (b *AWSCommand) executeAutoscaling(ctx context.Context, flagValues *map[string]any) error {
-	filterByName := (*flagValues)["filter-by-name"].(string)
-	force := (*flagValues)["force"].(bool)
+func (b *AWSCommand) executeAutoscaling(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	filterByName := (*extras)["filter-by-name"].(string)
+	force := (*extras)["force"].(bool)
 
-	collectDeletes := (*flagValues)["delete"].(bool)
+	collectDeletes := globals.Delete
 	deleteNames := make([]string, 0)
 
 	paginator := autoscaling.NewDescribeAutoScalingGroupsPaginator(b.AWSClient.ASG, &autoscaling.DescribeAutoScalingGroupsInput{})
 
 	stream := printer.NewStreamTable(b.Output, true, []string{"AutoScalingGroup Name", "Min", "Desired", "Max", "Instances", "LBs", "TargetGroups"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	for paginator.HasMorePages() {

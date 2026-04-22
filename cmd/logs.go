@@ -54,8 +54,8 @@ type logGroupRes struct {
 	Retention string
 }
 
-func (c *AWSCommand) executeLogs(ctx context.Context, flagValues *map[string]any) error {
-	collectDeletes := (*flagValues)["delete"].(bool)
+func (c *AWSCommand) executeLogs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	collectDeletes := globals.Delete
 	deleteNames := make([]string, 0)
 
 	resChan := make(chan logGroupRes, 100)
@@ -65,7 +65,7 @@ func (c *AWSCommand) executeLogs(ctx context.Context, flagValues *map[string]any
 	g.Go(func() error {
 		defer close(resChan)
 		input := &cloudwatchlogs.DescribeLogGroupsInput{}
-		if prefix, ok := (*flagValues)["filter-by-name"].(string); ok && prefix != "" {
+		if prefix, ok := (*extras)["filter-by-name"].(string); ok && prefix != "" {
 			input.LogGroupNamePrefix = aws.String(prefix)
 		}
 
@@ -100,7 +100,7 @@ func (c *AWSCommand) executeLogs(ctx context.Context, flagValues *map[string]any
 	})
 
 	stream := printer.NewStreamTable(c.Output, true, []string{"Log Group Name", "Stored Bytes", "Retention"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	for res := range resChan {

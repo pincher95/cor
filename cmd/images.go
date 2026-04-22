@@ -56,19 +56,19 @@ var imagesCmd = &cobra.Command{
 	},
 }
 
-func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]any) error {
+func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	// preserve the original context for delete operations (avoid errgroup ctx cancellation)
 	rootCtx := ctx
 
-	collectDeletes := (*flagValues)["delete"].(bool)
+	collectDeletes := globals.Delete
 	type imageDeleteCandidate struct {
 		imageID     string
 		snapshotIDs []string
 	}
 	deleteCandidates := make([]imageDeleteCandidate, 0)
 
-	includeUsedByInstance := (*flagValues)["include-used-by-instance"].(bool)
-	includeUsedByLaunchTemplate := (*flagValues)["include-used-by-launch-template"].(bool)
+	includeUsedByInstance := (*extras)["include-used-by-instance"].(bool)
+	includeUsedByLaunchTemplate := (*extras)["include-used-by-launch-template"].(bool)
 
 	// Streaming output header
 	header := []string{"ami name", "ami id", "creation date", "snapshot ids"}
@@ -82,22 +82,22 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 		header = []string{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance", "used by Launch Template"}
 	}
 	stream := printer.NewStreamTable(i.Output, true, header)
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	// Parse the creation date flags
 	var beforeCreationDate, afterCreationDate *time.Time
 	dateLayout := "2006-01-02"
-	if (*flagValues)["creation-date-before"].(string) != "" {
-		t, err := time.Parse(dateLayout, (*flagValues)["creation-date-before"].(string))
+	if (*extras)["creation-date-before"].(string) != "" {
+		t, err := time.Parse(dateLayout, (*extras)["creation-date-before"].(string))
 		if err != nil {
 			i.Logger.LogError("Error parsing creation date", err, nil, false)
 			return err
 		}
 		beforeCreationDate = &t
 	}
-	if (*flagValues)["creation-date-after"].(string) != "" {
-		t, err := time.Parse(dateLayout, (*flagValues)["creation-date-after"].(string))
+	if (*extras)["creation-date-after"].(string) != "" {
+		t, err := time.Parse(dateLayout, (*extras)["creation-date-after"].(string))
 		if err != nil {
 			i.Logger.LogError("Error parsing creation date", err, nil, false)
 			return err
@@ -283,7 +283,7 @@ func (i *AWSCommand) executeImages(ctx context.Context, flagValues *map[string]a
 	// -------------------------------------------------------------------------
 	// Describe images and stream results
 	// -------------------------------------------------------------------------
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 	imageFilters := []ec2types.Filter{}
 	if filterByName != "" {
 		imageFilters = append(imageFilters, ec2types.Filter{

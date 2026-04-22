@@ -51,13 +51,13 @@ func init() {
 	route53ZonesCmd.Flags().Bool("include-non-empty", false, "Include zones that have records beyond NS/SOA.")
 }
 
-func (r *AWSCommand) executeRoute53Zones(ctx context.Context, flagValues *map[string]any) error {
-	collectDeletes := (*flagValues)["delete"].(bool)
-	includeNonEmpty := (*flagValues)["include-non-empty"].(bool)
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+func (r *AWSCommand) executeRoute53Zones(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	collectDeletes := globals.Delete
+	includeNonEmpty := (*extras)["include-non-empty"].(bool)
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
 	stream := printer.NewStreamTable(r.Output, true, []string{"Zone Name", "Zone ID", "RecordSets", "Private", "Orphan"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteIDs := make([]string, 0)

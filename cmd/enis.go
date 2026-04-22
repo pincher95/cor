@@ -110,22 +110,22 @@ func init() {
 	_ = enisCmd.Flags().MarkHidden("filter-by-private-ip")
 }
 
-func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any) error {
+func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	cache := newAWSNameCache()
 
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
-	filterByENIs := mergeCSV(flagValues, "filter-by-enis", "filter-by-id-or-name")
-	filterByVPC := mergeCSV(flagValues, "filter-by-vpc", "filter-by-vpc-id")
-	filterBySubnet := mergeCSV(flagValues, "filter-by-subnet", "filter-by-subnet-id")
-	filterBySG := mergeCSV(flagValues, "filter-by-sg", "filter-by-security-group-id")
-	filterByType := mergeCSV(flagValues, "filter-by-type", "filter-by-interface-type")
-	filterByIP := mergeCSV(flagValues, "filter-by-ip", "filter-by-private-ip")
-	filterByDesc := normalizeFilterValue(getFlagString(flagValues, "filter-by-desc"))
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	filterByENIs := mergeCSV(extras, "filter-by-enis", "filter-by-id-or-name")
+	filterByVPC := mergeCSV(extras, "filter-by-vpc", "filter-by-vpc-id")
+	filterBySubnet := mergeCSV(extras, "filter-by-subnet", "filter-by-subnet-id")
+	filterBySG := mergeCSV(extras, "filter-by-sg", "filter-by-security-group-id")
+	filterByType := mergeCSV(extras, "filter-by-type", "filter-by-interface-type")
+	filterByIP := mergeCSV(extras, "filter-by-ip", "filter-by-private-ip")
+	filterByDesc := normalizeFilterValue(getFlagString(extras, "filter-by-desc"))
 	if filterByDesc == "" {
-		filterByDesc = normalizeFilterValue(getFlagString(flagValues, "filter-by-description"))
+		filterByDesc = normalizeFilterValue(getFlagString(extras, "filter-by-description"))
 	}
 
-	return runOrphanPipeline(e, ctx, flagValues, OrphanPipeline[types.NetworkInterface, orphanENI]{
+	return runOrphanPipeline(e, ctx, globals, extras, OrphanPipeline[types.NetworkInterface, orphanENI]{
 		Headers:       []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC", "Subnet", "Private IP", "Security Groups"},
 		ResourceLabel: "ENIs",
 		List: func(ctx context.Context, emit func(types.NetworkInterface) error) error {

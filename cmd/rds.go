@@ -58,15 +58,15 @@ type rdsResource struct {
 	Created string
 }
 
-func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any) error {
+func (c *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	// If neither flag is set, default to both true (preserves pre-runner behavior).
-	if !(*flagValues)["include-instances"].(bool) && !(*flagValues)["include-snapshots"].(bool) {
-		(*flagValues)["include-instances"] = true
-		(*flagValues)["include-snapshots"] = true
+	if !(*extras)["include-instances"].(bool) && !(*extras)["include-snapshots"].(bool) {
+		(*extras)["include-instances"] = true
+		(*extras)["include-snapshots"] = true
 	}
 	rootCtx := ctx
 
-	collectDeletes := (*flagValues)["delete"].(bool)
+	collectDeletes := globals.Delete
 	deleteCandidates := make([]rdsResource, 0)
 
 	resChan := make(chan rdsResource, 50)
@@ -74,7 +74,7 @@ func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any)
 	var producerWG sync.WaitGroup
 
 	// Producer: Instances
-	if (*flagValues)["include-instances"].(bool) {
+	if (*extras)["include-instances"].(bool) {
 		producerWG.Add(1)
 		g.Go(func() error {
 			defer producerWG.Done()
@@ -110,7 +110,7 @@ func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any)
 	}
 
 	// Producer: Snapshots
-	if (*flagValues)["include-snapshots"].(bool) {
+	if (*extras)["include-snapshots"].(bool) {
 		producerWG.Add(1)
 		g.Go(func() error {
 			defer producerWG.Done()
@@ -151,7 +151,7 @@ func (c *AWSCommand) executeRDS(ctx context.Context, flagValues *map[string]any)
 
 	// Stream output + delete as we go
 	stream := printer.NewStreamTable(c.Output, true, []string{"Type", "ID", "Status", "Created"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	for res := range resChan {

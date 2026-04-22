@@ -52,10 +52,10 @@ func init() {
 	elasticIPsCmd.Flags().String("filter-by-name", "", "Filter Elastic IPs by tag:Name (empty = no filter).")
 }
 
-func (a *AWSCommand) executeElasticIPs(ctx context.Context, flagValues *map[string]any) error {
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+func (a *AWSCommand) executeElasticIPs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
-	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[types.Address, orphanElasticIP]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.Address, orphanElasticIP]{
 		Headers:       []string{"Name", "Allocation ID", "Allocated Public address", "Association ID", "Network interface ID"},
 		ResourceLabel: "Elastic IPs",
 		List: func(ctx context.Context, emit func(types.Address) error) error {

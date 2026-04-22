@@ -80,14 +80,14 @@ func init() {
 	elbv2Cmd.Flags().Bool("show-tags", false, "Include tags column in output.")
 }
 
-func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]any) error {
+func (e *AWSCommand) executeElbv2(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	// Preserve the original context for delete operations (avoid errgroup ctx cancellation).
 	rootCtx := ctx
 
-	collectDeletes := (*flagValues)["delete"].(bool)
-	showUnhealthy := (*flagValues)["show-unhealthy"].(bool)
-	showTags := (*flagValues)["show-tags"].(bool)
-	tagFilters := parseTagFilters((*flagValues)["filter-by-tags"].(string))
+	collectDeletes := globals.Delete
+	showUnhealthy := (*extras)["show-unhealthy"].(bool)
+	showTags := (*extras)["show-tags"].(bool)
+	tagFilters := parseTagFilters((*extras)["filter-by-tags"].(string))
 
 	// Create channels to send load balancers
 	loadBalancerChan := make(chan types.LoadBalancer, 50)
@@ -95,7 +95,7 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 
 	// Create an errgroup with context
 	g, egCtx := errgroup.WithContext(ctx)
-	filterByName := normalizeFilterValue((*flagValues)["filter-by-name"].(string))
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
 	// Goroutine to describe load balancers
 	g.Go(func() error {
@@ -142,7 +142,7 @@ func (e *AWSCommand) executeElbv2(ctx context.Context, flagValues *map[string]an
 			headers = append(headers, "Tags")
 		}
 		stream := printer.NewStreamTable(e.Output, true, headers)
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+		stream.SetSort(globals.SortBy, globals.SortDesc)
 		deleteCandidates := make([]deleteCandidate, 0)
 		finish := func(err error) {
 			stream.Close()

@@ -73,10 +73,10 @@ func init() {
 	elasticacheCmd.Flags().Int("hours-zero-connections", 24, "Consider clusters orphaned if zero connections for this many hours")
 }
 
-func (a *AWSCommand) executeElastiCache(ctx context.Context, flagValues *map[string]any) error {
-	hoursZeroConnections := int64((*flagValues)["hours-zero-connections"].(int))
+func (a *AWSCommand) executeElastiCache(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	hoursZeroConnections := int64((*extras)["hours-zero-connections"].(int))
 
-	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[elasticachetypes.CacheCluster, orphanElastiCacheCluster]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[elasticachetypes.CacheCluster, orphanElastiCacheCluster]{
 		Headers:       []string{"Cluster ID", "Engine", "Node Type", "Nodes", "Status", "Created", "Days Since Activity", "Reason"},
 		ResourceLabel: "ElastiCache clusters",
 		HideIndex:     true,

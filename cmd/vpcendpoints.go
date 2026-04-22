@@ -54,15 +54,15 @@ func init() {
 	vpcEndpointsCmd.Flags().Bool("include-non-interface", false, "Include non-interface endpoints (gateway endpoints are typically free).")
 }
 
-func (v *AWSCommand) executeVPCEndpoints(ctx context.Context, flagValues *map[string]any) error {
+func (v *AWSCommand) executeVPCEndpoints(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	rootCtx := ctx
-	collectDeletes := (*flagValues)["delete"].(bool)
-	filterByService := normalizeFilterValue((*flagValues)["filter-by-service"].(string))
-	includeAttached := (*flagValues)["include-attached"].(bool)
-	includeNonInterface := (*flagValues)["include-non-interface"].(bool)
+	collectDeletes := globals.Delete
+	filterByService := normalizeFilterValue((*extras)["filter-by-service"].(string))
+	includeAttached := (*extras)["include-attached"].(bool)
+	includeNonInterface := (*extras)["include-non-interface"].(bool)
 
 	stream := printer.NewStreamTable(v.Output, true, []string{"Name", "Endpoint ID", "Service", "Type", "State", "ENIs"})
-	stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+	stream.SetSort(globals.SortBy, globals.SortDesc)
 	defer stream.Close()
 
 	deleteIDs := make([]string, 0)

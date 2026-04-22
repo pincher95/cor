@@ -54,7 +54,8 @@ func TestRunResourceCommand_HappyPath(t *testing.T) {
 		buildClientsCalled bool
 		executeCalled      bool
 		capturedAWSCmd     *AWSCommand
-		capturedFlagValues *map[string]any
+		capturedGlobals    *flags.GlobalFlags
+		capturedExtras     *map[string]any
 		capturedCfg        *aws.Config
 	)
 
@@ -67,10 +68,11 @@ func TestRunResourceCommand_HappyPath(t *testing.T) {
 		},
 	}
 
-	execute := func(awsCmd *AWSCommand, ctx context.Context, fv *map[string]any) error {
+	execute := func(awsCmd *AWSCommand, ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 		executeCalled = true
 		capturedAWSCmd = awsCmd
-		capturedFlagValues = fv
+		capturedGlobals = globals
+		capturedExtras = extras
 		return nil
 	}
 
@@ -106,13 +108,36 @@ func TestRunResourceCommand_HappyPath(t *testing.T) {
 		t.Error("expected AWSCommand.CloudConfig to be set")
 	}
 
-	expectedKeys := []string{"region", "profile", "auth-method", "delete", "sort-by", "sort-desc", "filter-by-name"}
-	for _, k := range expectedKeys {
-		if _, ok := (*capturedFlagValues)[k]; !ok {
-			t.Errorf("expected flagValue %q to be present", k)
-		}
+	if capturedGlobals == nil {
+		t.Fatal("expected execute to receive non-nil globals")
 	}
-	if (*capturedFlagValues)["region"].(string) != "us-west-2" {
-		t.Errorf("expected region flag to be us-west-2, got %v", (*capturedFlagValues)["region"])
+	if capturedGlobals.Region != "us-west-2" {
+		t.Errorf("expected globals.Region to be us-west-2, got %q", capturedGlobals.Region)
+	}
+	if capturedGlobals.Profile != "default" {
+		t.Errorf("expected globals.Profile to be default, got %q", capturedGlobals.Profile)
+	}
+	if capturedGlobals.AuthMethod != "AWS_CREDENTIALS_FILE" {
+		t.Errorf("expected globals.AuthMethod to be AWS_CREDENTIALS_FILE, got %q", capturedGlobals.AuthMethod)
+	}
+	if capturedGlobals.Delete != false {
+		t.Errorf("expected globals.Delete to be false, got %v", capturedGlobals.Delete)
+	}
+	if capturedGlobals.SortBy != "" {
+		t.Errorf("expected globals.SortBy to be empty, got %q", capturedGlobals.SortBy)
+	}
+	if capturedGlobals.SortDesc != false {
+		t.Errorf("expected globals.SortDesc to be false, got %v", capturedGlobals.SortDesc)
+	}
+	if capturedExtras == nil {
+		t.Fatal("expected execute to receive non-nil extras")
+	}
+	if _, ok := (*capturedExtras)["filter-by-name"]; !ok {
+		t.Errorf("expected extras to contain 'filter-by-name'")
+	}
+	for _, globalKey := range []string{"region", "profile", "auth-method", "delete", "sort-by", "sort-desc"} {
+		if _, ok := (*capturedExtras)[globalKey]; ok {
+			t.Errorf("extras should not contain global key %q", globalKey)
+		}
 	}
 }

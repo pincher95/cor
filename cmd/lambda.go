@@ -75,11 +75,11 @@ func init() {
 	lambdaCmd.Flags().Int("min-old-versions", 10, "Minimum number of old versions to report")
 }
 
-func (a *AWSCommand) executeLambda(ctx context.Context, flagValues *map[string]any) error {
-	daysSinceInvocation := int64((*flagValues)["days-since-invocation"].(int))
-	minOldVersions := int32((*flagValues)["min-old-versions"].(int))
+func (a *AWSCommand) executeLambda(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	daysSinceInvocation := int64((*extras)["days-since-invocation"].(int))
+	minOldVersions := int32((*extras)["min-old-versions"].(int))
 
-	return runOrphanPipeline(a, ctx, flagValues, OrphanPipeline[lambdatypes.FunctionConfiguration, orphanLambdaFunction]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[lambdatypes.FunctionConfiguration, orphanLambdaFunction]{
 		Headers:       []string{"Function Name", "Runtime", "Memory", "Last Modified", "Days Since Invocation", "Versions", "Provisioned Concurrency", "Reason"},
 		ResourceLabel: "Lambda functions",
 		HideIndex:     true,

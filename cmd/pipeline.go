@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/printer"
 	"golang.org/x/sync/errgroup"
 )
@@ -74,8 +75,9 @@ type OrphanPipeline[Item, Result any] struct {
 // the contract.
 //
 // The caller retains ownership of any AWS clients — the pipeline only
-// touches the spec's callbacks. flagValues must carry the six base flags
-// populated by flags.GetFlags (sort-by, sort-desc, delete, ...).
+// touches the spec's callbacks. `globals` carries the typed root flags
+// (sort-by, sort-desc, delete, ...); `extras` carries per-command flags
+// and is threaded through for future use.
 //
 // Implemented as a top-level function (not a method on *AWSCommand)
 // because Go does not permit methods with type parameters; the
@@ -83,12 +85,14 @@ type OrphanPipeline[Item, Result any] struct {
 func runOrphanPipeline[Item, Result any](
 	a *AWSCommand,
 	ctx context.Context,
-	flagValues *map[string]any,
+	globals *flags.GlobalFlags,
+	extras *map[string]any,
 	spec OrphanPipeline[Item, Result],
 ) error {
+	// extras is threaded through for future per-command use by the pipeline helper.
 	rootCtx := ctx
 
-	collectDeletes := (*flagValues)["delete"].(bool) && spec.Delete != nil
+	collectDeletes := globals.Delete && spec.Delete != nil
 
 	itemChan := make(chan Item, 50)
 	resultChan := make(chan Result, 50)
@@ -138,7 +142,7 @@ func runOrphanPipeline[Item, Result any](
 	go func() {
 		defer close(collectorDone)
 		stream := printer.NewStreamTable(a.Output, !spec.HideIndex, spec.Headers)
-		stream.SetSort((*flagValues)["sort-by"].(string), (*flagValues)["sort-desc"].(bool))
+		stream.SetSort(globals.SortBy, globals.SortDesc)
 		defer stream.Close()
 		for r := range resultChan {
 			stream.WriteRow(spec.ToRow(r)...)
