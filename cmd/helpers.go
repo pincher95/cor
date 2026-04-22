@@ -20,6 +20,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
@@ -159,4 +160,65 @@ func formatElbTags(tags map[string]string) string {
 	}
 	sort.Strings(values)
 	return strings.Join(values, "\n")
+}
+
+// awsNameCache is a goroutine-safe cache of AWS resource-name lookups
+// keyed by VPC ID, subnet ID, and security-group ID. It eliminates
+// duplicate Describe* calls when many items share the same VPC/subnet/SG.
+//
+// The three maps are independent. A caller that only populates one map
+// (e.g. only subnet names) pays no cost on the other two.
+type awsNameCache struct {
+	mu      sync.RWMutex
+	vpcs    map[string]string
+	subnets map[string]string
+	sgs     map[string]string
+}
+
+// splitCSV splits a comma-separated filter value into trimmed, non-empty
+// tokens, skipping "*" (the "no filter" sentinel). Returns nil when the
+// input is empty or contains only skipped tokens.
+func splitCSV(raw string) []string {
+	raw = normalizeFilterValue(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || p == "*" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// getFlagString returns the string value for the given flag name, or "".
+func getFlagString(flagValues *map[string]any, name string) string {
+	if v, ok := (*flagValues)[name].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// mergeCSV unions CSV tokens from the named flags, preserving first-seen
+// order and dropping duplicates.
+func mergeCSV(flagValues *map[string]any, names ...string) []string {
+	seen := make(map[string]struct{}, 8)
+	out := make([]string, 0)
+	for _, n := range names {
+		for _, v := range splitCSV(getFlagString(flagValues, n)) {
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
 }

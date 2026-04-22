@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -40,15 +39,6 @@ type orphanENI struct {
 	subnetDisplay    string
 	privateIP        string
 	securityGroups   string
-}
-
-// eniNameCache memoizes VPC / subnet / security-group Name lookups across
-// the ENI workers so repeated Describe* round-trips are avoided.
-type eniNameCache struct {
-	mu      sync.RWMutex
-	vpcs    map[string]string
-	subnets map[string]string
-	sgs     map[string]string
 }
 
 // enisCmd represents the enis command
@@ -121,7 +111,7 @@ func init() {
 }
 
 func (e *AWSCommand) executeENIs(ctx context.Context, flagValues *map[string]any) error {
-	cache := &eniNameCache{
+	cache := &awsNameCache{
 		vpcs:    make(map[string]string),
 		subnets: make(map[string]string),
 		sgs:     make(map[string]string),
@@ -330,7 +320,7 @@ func formatIDAndName(id string, name string) string {
 }
 
 // getVPCName returns the tag:Name of the given VPC, caching the result.
-func (e *AWSCommand) getVPCName(ctx context.Context, cache *eniNameCache, vpcID string) string {
+func (e *AWSCommand) getVPCName(ctx context.Context, cache *awsNameCache, vpcID string) string {
 	if vpcID == "" || vpcID == "-" {
 		return "-"
 	}
@@ -356,7 +346,7 @@ func (e *AWSCommand) getVPCName(ctx context.Context, cache *eniNameCache, vpcID 
 }
 
 // getSubnetName returns the tag:Name of the given subnet, caching the result.
-func (e *AWSCommand) getSubnetName(ctx context.Context, cache *eniNameCache, subnetID string) string {
+func (e *AWSCommand) getSubnetName(ctx context.Context, cache *awsNameCache, subnetID string) string {
 	if subnetID == "" || subnetID == "-" {
 		return "-"
 	}
@@ -384,7 +374,7 @@ func (e *AWSCommand) getSubnetName(ctx context.Context, cache *eniNameCache, sub
 // ensureSGNames populates the security-group name cache for any of the given
 // IDs that are not yet cached. On partial failure the missing IDs are cached
 // as "-" so subsequent lookups do not re-issue the same failing request.
-func (e *AWSCommand) ensureSGNames(ctx context.Context, cache *eniNameCache, sgIDs []string) {
+func (e *AWSCommand) ensureSGNames(ctx context.Context, cache *awsNameCache, sgIDs []string) {
 	missing := make([]string, 0)
 	cache.mu.RLock()
 	for _, id := range sgIDs {
@@ -427,7 +417,7 @@ func (e *AWSCommand) ensureSGNames(ctx context.Context, cache *eniNameCache, sgI
 // formatSGList renders a newline-separated "id (Name)" list for the given
 // security group IDs, matching the pre-refactor worker's inline formatting.
 // Returns "-" when no IDs are provided.
-func formatSGList(cache *eniNameCache, sgIDList []string) string {
+func formatSGList(cache *awsNameCache, sgIDList []string) string {
 	if len(sgIDList) == 0 {
 		return "-"
 	}
@@ -439,51 +429,4 @@ func formatSGList(cache *eniNameCache, sgIDList []string) string {
 	cache.mu.RUnlock()
 	// One SG per line for readability.
 	return strings.Join(parts, "\n")
-}
-
-// splitCSV splits a comma-separated flag value into trimmed, non-empty
-// tokens, skipping "*" (which matches the "no filter" sentinel).
-func splitCSV(raw string) []string {
-	raw = normalizeFilterValue(raw)
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" || p == "*" {
-			continue
-		}
-		out = append(out, p)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// getFlagString returns the string value for the given flag name, or "".
-func getFlagString(flagValues *map[string]any, name string) string {
-	if v, ok := (*flagValues)[name].(string); ok {
-		return v
-	}
-	return ""
-}
-
-// mergeCSV unions the CSV tokens from the named flags, preserving first-seen
-// order and dropping duplicates.
-func mergeCSV(flagValues *map[string]any, names ...string) []string {
-	seen := make(map[string]struct{}, 8)
-	out := make([]string, 0)
-	for _, n := range names {
-		for _, v := range splitCSV(getFlagString(flagValues, n)) {
-			if _, ok := seen[v]; ok {
-				continue
-			}
-			seen[v] = struct{}{}
-			out = append(out, v)
-		}
-	}
-	return out
 }
