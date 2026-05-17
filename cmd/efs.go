@@ -18,16 +18,22 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/efs"
-	"github.com/aws/aws-sdk-go-v2/service/efs/types"
+	efstypes "github.com/aws/aws-sdk-go-v2/service/efs/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 )
+
+type orphanEFS struct {
+	name         string
+	id           string
+	mountTargets int32
+	sizeBytes    int64
+	state        string
+}
 
 var efsCmd = &cobra.Command{
 	Use:   "efs",
@@ -51,34 +57,37 @@ func init() {
 	efsCmd.Flags().Bool("include-attached", false, "Include file systems that have mount targets (default: show only orphans).")
 }
 
-func (e *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := globals.Delete
-	includeAttached := (*extras)["include-attached"].(bool)
+func (a *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	includeAttached := (*extras)["include-attached"].(bool)
 
-	stream := printer.NewStreamTable(e.Output, true, []string{"Name", "FileSystem ID", "MountTargets", "SizeBytes", "LifecycleState"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	deleteIDs := make([]string, 0)
-	paginator := efs.NewDescribeFileSystemsPaginator(e.AWSClient.EFS, &efs.DescribeFileSystemsInput{})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, fs := range page.FileSystems {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[efstypes.FileSystemDescription, orphanEFS]{
+		Headers:       []string{"Name", "FileSystem ID", "MountTargets", "SizeBytes", "LifecycleState"},
+		ResourceLabel: "EFS file systems",
+		List: func(ctx context.Context, emit func(efstypes.FileSystemDescription) error) error {
+			p := efs.NewDescribeFileSystemsPaginator(a.AWSClient.EFS, &efs.DescribeFileSystemsInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, fs := range page.FileSystems {
+					if err := emit(fs); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(ctx context.Context, fs efstypes.FileSystemDescription) (*orphanEFS, error) {
 			mtCount := fs.NumberOfMountTargets
 			if !includeAttached && mtCount > 0 {
-				continue
+				return nil, nil
 			}
-
 			name := "-"
-			tagOutput, err := e.AWSClient.EFS.ListTagsForResource(ctx, &efs.ListTagsForResourceInput{
+			if tagOutput, err := a.AWSClient.EFS.ListTagsForResource(ctx, &efs.ListTagsForResourceInput{
 				ResourceId: fs.FileSystemId,
-			})
-			if err == nil {
+			}); err == nil {
 				for _, tag := range tagOutput.Tags {
 					if tag.Key != nil && *tag.Key == "Name" && tag.Value != nil {
 						name = *tag.Value
@@ -86,42 +95,32 @@ func (e *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags,
 					}
 				}
 			}
-
-			if filterByName != "" && !strings.Contains(name, filterByName) {
-				continue
+			if !matchesFilterValue(name, filterByName) {
+				return nil, nil
 			}
-
-			sizeBytes := fs.SizeInBytes.Value
+			sizeBytes := int64(0)
+			if fs.SizeInBytes != nil {
+				sizeBytes = fs.SizeInBytes.Value
+			}
 			state := string(fs.LifeCycleState)
 			if state == "" {
-				state = string(types.LifeCycleStateAvailable)
+				state = string(efstypes.LifeCycleStateAvailable)
 			}
-
-			stream.WriteRow(name, aws.ToString(fs.FileSystemId), mtCount, sizeBytes, state)
-			if collectDeletes {
-				deleteIDs = append(deleteIDs, aws.ToString(fs.FileSystemId))
-			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(e.Prompter, e.Logger)
-		if err != nil {
+			return &orphanEFS{
+				name:         name,
+				id:           aws.ToString(fs.FileSystemId),
+				mountTargets: mtCount,
+				sizeBytes:    sizeBytes,
+				state:        state,
+			}, nil
+		},
+		ToRow: func(r orphanEFS) []any {
+			return []any{r.name, r.id, r.mountTargets, r.sizeBytes, r.state}
+		},
+		Delete: func(ctx context.Context, r orphanEFS) error {
+			a.Logger.LogInfo("Deleting EFS", map[string]any{"FileSystemId": r.id})
+			_, err := a.AWSClient.EFS.DeleteFileSystem(ctx, &efs.DeleteFileSystemInput{FileSystemId: aws.String(r.id)})
 			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, fsID := range deleteIDs {
-			e.Logger.LogInfo("Deleting EFS", map[string]any{"FileSystemId": fsID})
-			if _, err := e.AWSClient.EFS.DeleteFileSystem(rootCtx, &efs.DeleteFileSystemInput{FileSystemId: aws.String(fsID)}); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+		},
+	})
 }

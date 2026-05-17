@@ -18,16 +18,21 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 )
+
+type orphanClientVPN struct {
+	id          string
+	description string
+	status      string
+	activeConns int
+}
 
 var clientVPNCmd = &cobra.Command{
 	Use:   "clientvpn",
@@ -51,71 +56,68 @@ func init() {
 	clientVPNCmd.Flags().Bool("include-active", false, "Include endpoints with active connections.")
 }
 
-func (c *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := globals.Delete
+func (a *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 	includeActive := (*extras)["include-active"].(bool)
 
-	stream := printer.NewStreamTable(c.Output, true, []string{"Endpoint ID", "Description", "Status", "ActiveConnections"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	deleteIDs := make([]string, 0)
-	paginator := ec2.NewDescribeClientVpnEndpointsPaginator(c.AWSClient.EC2, &ec2.DescribeClientVpnEndpointsInput{})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, ep := range page.ClientVpnEndpoints {
-			desc := aws.ToString(ep.Description)
-			if filterByName != "" && !strings.Contains(desc, filterByName) {
-				continue
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[ec2types.ClientVpnEndpoint, orphanClientVPN]{
+		Headers:       []string{"Endpoint ID", "Description", "Status", "ActiveConnections"},
+		ResourceLabel: "Client VPN endpoints",
+		List: func(ctx context.Context, emit func(ec2types.ClientVpnEndpoint) error) error {
+			p := ec2.NewDescribeClientVpnEndpointsPaginator(a.AWSClient.EC2, &ec2.DescribeClientVpnEndpointsInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, ep := range page.ClientVpnEndpoints {
+					if err := emit(ep); err != nil {
+						return err
+					}
+				}
 			}
-			activeCount, err := c.countActiveClientVPNConnections(ctx, aws.ToString(ep.ClientVpnEndpointId))
+			return nil
+		},
+		Process: func(ctx context.Context, ep ec2types.ClientVpnEndpoint) (*orphanClientVPN, error) {
+			desc := aws.ToString(ep.Description)
+			if !matchesFilterValue(desc, filterByName) {
+				return nil, nil
+			}
+			activeCount, err := a.countActiveClientVPNConnections(ctx, aws.ToString(ep.ClientVpnEndpointId))
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if !includeActive && activeCount > 0 {
-				continue
+				return nil, nil
 			}
 			status := "-"
 			if ep.Status != nil {
 				status = string(ep.Status.Code)
 			}
-			stream.WriteRow(aws.ToString(ep.ClientVpnEndpointId), desc, status, activeCount)
-			if collectDeletes && activeCount == 0 {
-				deleteIDs = append(deleteIDs, aws.ToString(ep.ClientVpnEndpointId))
+			return &orphanClientVPN{
+				id:          aws.ToString(ep.ClientVpnEndpointId),
+				description: desc,
+				status:      status,
+				activeConns: activeCount,
+			}, nil
+		},
+		ToRow: func(r orphanClientVPN) []any {
+			return []any{r.id, r.description, r.status, r.activeConns}
+		},
+		Delete: func(ctx context.Context, r orphanClientVPN) error {
+			if r.activeConns > 0 {
+				return nil
 			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(c.Prompter, c.Logger)
-		if err != nil {
+			a.Logger.LogInfo("Deleting Client VPN endpoint", map[string]any{"EndpointId": r.id})
+			_, err := a.AWSClient.EC2.DeleteClientVpnEndpoint(ctx, &ec2.DeleteClientVpnEndpointInput{
+				ClientVpnEndpointId: aws.String(r.id),
+			})
 			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, id := range deleteIDs {
-			c.Logger.LogInfo("Deleting Client VPN endpoint", map[string]any{"EndpointId": id})
-			if _, err := c.AWSClient.EC2.DeleteClientVpnEndpoint(rootCtx, &ec2.DeleteClientVpnEndpointInput{
-				ClientVpnEndpointId: aws.String(id),
-			}); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+		},
+	})
 }
 
-func (c *AWSCommand) countActiveClientVPNConnections(ctx context.Context, endpointID string) (int, error) {
+func (a *AWSCommand) countActiveClientVPNConnections(ctx context.Context, endpointID string) (int, error) {
 	if endpointID == "" {
 		return 0, nil
 	}
@@ -123,7 +125,7 @@ func (c *AWSCommand) countActiveClientVPNConnections(ctx context.Context, endpoi
 		Name:   aws.String("status.code"),
 		Values: []string{"active"},
 	}
-	p := ec2.NewDescribeClientVpnConnectionsPaginator(c.AWSClient.EC2, &ec2.DescribeClientVpnConnectionsInput{
+	p := ec2.NewDescribeClientVpnConnectionsPaginator(a.AWSClient.EC2, &ec2.DescribeClientVpnConnectionsInput{
 		ClientVpnEndpointId: aws.String(endpointID),
 		Filters:             []ec2types.Filter{filter},
 		MaxResults:          aws.Int32(50),

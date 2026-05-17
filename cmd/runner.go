@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
@@ -35,6 +34,13 @@ type CommandSetup struct {
 
 // newConfigFn is a test seam: tests override it to avoid hitting real AWS config resolution.
 var newConfigFn = handlers.NewConfig
+
+// buildClientsFn is a test seam: tests override it to inject fake clients
+// without changing per-command BuildClients callbacks. Production calls
+// setup.BuildClients(cfg) unchanged.
+var buildClientsFn = func(setup CommandSetup, cfg *aws.Config) *handlers.AWSClientImpl {
+	return setup.BuildClients(cfg)
+}
 
 // runResourceCommand handles the boilerplate phase of every resource command:
 // flag retrieval, AWS config resolution, client assembly, and AWSCommand packaging.
@@ -71,21 +77,21 @@ func runResourceCommand(
 		return err
 	}
 
-	client := setup.BuildClients(cfg)
+	client := buildClientsFn(setup, cfg)
 	if client == nil {
 		return fmt.Errorf("runResourceCommand: BuildClients returned nil")
 	}
-	awsCmd := newAWSCommand(client, cloudConfig, os.Stdin, os.Stdout)
+	awsCmd := newAWSCommandWithFormat(client, cloudConfig, cmd.InOrStdin(), cmd.OutOrStdout(), globals.LogFormat)
 	return execute(awsCmd, ctx, globals, extras)
 }
 
-// newAWSCommand assembles an AWSCommand with the default logger/prompter/output
-// wiring. Split out for readability and testability.
-func newAWSCommand(client *handlers.AWSClientImpl, cloudConfig *handlers.CloudConfig, in io.Reader, out io.Writer) *AWSCommand {
+// newAWSCommandWithFormat builds an AWSCommand with the given log format,
+// stdin/stdout, and pre-built service clients.
+func newAWSCommandWithFormat(client *handlers.AWSClientImpl, cloudConfig *handlers.CloudConfig, in io.Reader, out io.Writer, logFormat string) *AWSCommand {
 	return &AWSCommand{
 		AWSClient:   *client,
 		CloudConfig: cloudConfig,
-		Logger:      logging.NewLogger(),
+		Logger:      logging.NewLoggerWithFormat(logFormat, out),
 		Prompter:    prompter.NewConsolePrompter(in, out),
 		Output:      out,
 	}

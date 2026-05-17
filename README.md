@@ -66,9 +66,14 @@ COR helps identify resources that continue to incur AWS charges even when orphan
 From the repo:
 
 ```bash
-go build -o cor .
+make build          # produces ./cor
 ./cor --help
 ```
+
+`make build` injects `version`/`commit`/`buildDate` from `git` via `-ldflags`.
+Plain `go build -o cor .` also works.
+
+Run `make help` for the full target list (test, lint, cover, dist, …).
 
 ### Authentication
 
@@ -94,6 +99,13 @@ Example env vars:
 - `COR_PROFILE=prod`
 - `COR_AUTH_METHOD=AWS_CREDENTIALS_FILE`
 - `COR_DELETE=true`
+- `COR_YES=true`
+- `COR_ON_ERROR=continue`
+- `COR_DRY_RUN=true`
+- `COR_FORMAT=json`
+- `COR_LOG_FORMAT=json`
+- `COR_METRICS_FILE=/var/log/cor.ndjson`
+- `COR_STATE_FILE=/var/lib/cor/state`
 - `COR_SORT_BY=Name`
 - `COR_SORT_DESC=true`
 
@@ -103,8 +115,16 @@ Example env vars:
 - `--profile, -p`: shared config profile (default: `default`)
 - `--auth-method, -a`: `AWS_CREDENTIALS_FILE` or `ENV_SECRET`
 - `--delete`: actually delete/release resources (prompts for confirmation)
+- `--yes`: skip the delete confirmation prompt — use only in automation
+- `--dry-run`: print what would be deleted without calling AWS delete APIs
+- `--on-error stop|continue`: per-item delete-error policy (default `stop`)
+- `--state-file <path>`: persist deleted-resource keys; skip them on re-run
 - `--sort-by`: sort output by a column name (buffers results; disables streaming)
 - `--sort-desc`: descending sort
+- `--format table|json|csv`: output format (default `table`)
+- `--log-format text|json`: log line format (default `text`)
+- `--metrics-file <path>`: append a per-run JSON metrics summary to this path
+- `--timeout`: overall command timeout (e.g. `5m`)
 - `--config`: config file path (default: `$HOME/.cor.yaml`)
 
 ### Examples
@@ -145,6 +165,40 @@ Example env vars:
 
 ```bash
 ./cor --config ./prod-config.yaml volumes
+```
+
+**Preview deletes without calling AWS (`--dry-run`):**
+
+```bash
+./cor volumes --delete --dry-run
+```
+
+**Non-interactive delete for automation (`--yes`):**
+
+```bash
+./cor volumes --delete --yes --on-error continue
+```
+
+**Machine-readable output (`--format`):**
+
+```bash
+./cor volumes --format json
+./cor snapshots --format csv --sort-by Size --sort-desc > orphans.csv
+```
+
+**Resumable runs with a state file:**
+
+```bash
+# first run records every deleted ID; interrupt at any time
+./cor volumes --delete --yes --state-file /tmp/cor-volumes.state
+# re-run skips already-deleted IDs
+./cor volumes --delete --yes --state-file /tmp/cor-volumes.state
+```
+
+**Per-run metrics + JSON logs (good for CI / cron):**
+
+```bash
+./cor volumes --log-format json --metrics-file /var/log/cor-metrics.ndjson
 ```
 
 **List orphan AMIs, including those used by instances:**
@@ -248,11 +302,26 @@ Example env vars:
 
 ### Development
 
-Run unit tests:
+The repo ships a `Makefile` covering the common workflows:
 
 ```bash
-go test ./...
+make build              # compile ./cor with ldflags-injected version
+make test               # go test ./...
+make test-race          # go test -race ./...
+make cover              # write coverage.out + print the summary
+make lint               # golangci-lint run ./...
+make vet                # go vet ./...
+make fmt                # gofmt -s -w .
+make tidy               # go mod tidy
+make vendor             # go mod vendor
+make run ARGS='volumes --region us-east-1'
+make dist               # cross-compile linux+darwin x amd64+arm64 into ./dist
+make clean              # remove ./cor, coverage.out, dist/
+make help               # list all targets
 ```
+
+Architecture, command pattern, and contributor notes live in `CLAUDE.md`,
+`CONTRIBUTING.md`, and (for deeper backgrounder) `research.md`.
 
 ### Profiling (optional)
 

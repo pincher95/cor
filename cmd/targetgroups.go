@@ -17,7 +17,6 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -60,15 +59,15 @@ func init() {
 	targetgroupsCmd.Flags().Bool("include-attached", false, "Include target groups attached to load balancers (default: show only orphans).")
 }
 
-func (t *AWSCommand) executeTargetGroups(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+func (a *AWSCommand) executeTargetGroups(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 	includeAttached := (*extras)["include-attached"].(bool)
 
-	return runOrphanPipeline(t, ctx, globals, extras, OrphanPipeline[elbtypes.TargetGroup, orphanTargetGroup]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[elbtypes.TargetGroup, orphanTargetGroup]{
 		Headers:       []string{"TargetGroup Name", "TargetGroup ARN", "TargetType", "Protocol", "Port", "VPC ID", "Attached LBs"},
 		ResourceLabel: "target groups",
 		List: func(ctx context.Context, emit func(elbtypes.TargetGroup) error) error {
-			p := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(t.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{})
+			p := elasticloadbalancingv2.NewDescribeTargetGroupsPaginator(a.AWSClient.ELB, &elasticloadbalancingv2.DescribeTargetGroupsInput{})
 			for p.HasMorePages() {
 				page, err := p.NextPage(ctx)
 				if err != nil {
@@ -84,7 +83,7 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, globals *flags.Glo
 		},
 		Process: func(_ context.Context, tg elbtypes.TargetGroup) (*orphanTargetGroup, error) {
 			name := aws.ToString(tg.TargetGroupName)
-			if filterByName != "" && !strings.Contains(name, filterByName) {
+			if !matchesFilterValue(name, filterByName) {
 				return nil, nil
 			}
 			attachedCount := 0
@@ -131,10 +130,11 @@ func (t *AWSCommand) executeTargetGroups(ctx context.Context, globals *flags.Glo
 			if r.attached > 0 {
 				return nil // never delete attached target groups, even when --include-attached shows them
 			}
-			t.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": r.arn})
-			_, err := t.AWSClient.ELB.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{TargetGroupArn: aws.String(r.arn)})
+			a.Logger.LogInfo("Deleting target group", map[string]any{"TargetGroupArn": r.arn})
+			_, err := a.AWSClient.ELB.DeleteTargetGroup(ctx, &elasticloadbalancingv2.DeleteTargetGroupInput{TargetGroupArn: aws.String(r.arn)})
 			return err
 		},
+		DeleteConcurrency: 10,
 	})
 }
 

@@ -103,7 +103,7 @@ func (a *AWSCommand) executeLambda(ctx context.Context, globals *flags.GlobalFla
 			if err != nil {
 				a.Logger.LogError("Error checking Lambda function", err, map[string]any{
 					"function": aws.ToString(fn.FunctionName),
-				}, false)
+				})
 				return nil, nil
 			}
 			return orphan, nil
@@ -123,11 +123,12 @@ func (a *AWSCommand) executeLambda(ctx context.Context, globals *flags.GlobalFla
 		Delete: func(ctx context.Context, r orphanLambdaFunction) error {
 			a.Logger.LogInfo("Deleting Lambda function", map[string]any{"function": r.Name})
 			if err := a.deleteLambdaFunction(ctx, r.Name); err != nil {
-				a.Logger.LogError("Failed to delete Lambda function", err, map[string]any{"function": r.Name}, false)
+				a.Logger.LogError("Failed to delete Lambda function", err, map[string]any{"function": r.Name})
 				return err
 			}
 			return nil
 		},
+		DedupKey: func(r orphanLambdaFunction) string { return r.Name },
 	})
 }
 

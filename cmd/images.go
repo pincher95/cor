@@ -30,12 +30,24 @@ import (
 	"github.com/aws/smithy-go"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
 
-// imagesCmd represents the images command
+type imageUsage struct {
+	count    int
+	examples []string
+}
+
+type orphanImage struct {
+	name             string
+	id               string
+	creationDate     string
+	snapshotIDs      []string
+	usedByInstance   string
+	usedByLaunchTmpl string
+}
+
 var imagesCmd = &cobra.Command{
 	Use:   "images",
 	Short: "List and optionally delete orphan AMIs (and their snapshots)",
@@ -56,71 +68,173 @@ var imagesCmd = &cobra.Command{
 	},
 }
 
-func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	// preserve the original context for delete operations (avoid errgroup ctx cancellation)
-	rootCtx := ctx
+func init() {
+	imagesCmd.PersistentFlags().String("creation-date-before", "", "Only include AMIs created before this UTC date (YYYY-MM-DD).")
+	imagesCmd.PersistentFlags().String("creation-date-after", "", "Only include AMIs created after this UTC date (YYYY-MM-DD).")
+	imagesCmd.Flags().String("filter-by-name", "", "Filter AMIs by name (empty = no filter).")
+	imagesCmd.Flags().Bool("include-used-by-instance", false, "Include images that are used by instances.")
+	imagesCmd.Flags().Bool("include-used-by-launch-template", false, "Include images that are used by launch templates.")
+}
 
-	collectDeletes := globals.Delete
-	type imageDeleteCandidate struct {
-		imageID     string
-		snapshotIDs []string
-	}
-	deleteCandidates := make([]imageDeleteCandidate, 0)
-
+func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	includeUsedByInstance := (*extras)["include-used-by-instance"].(bool)
 	includeUsedByLaunchTemplate := (*extras)["include-used-by-launch-template"].(bool)
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
-	// Streaming output header
-	header := []string{"ami name", "ami id", "creation date", "snapshot ids"}
-	if includeUsedByInstance && !includeUsedByLaunchTemplate {
-		header = []string{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance"}
-	}
-	if !includeUsedByInstance && includeUsedByLaunchTemplate {
-		header = []string{"ami name", "ami id", "creation date", "snapshot ids", "used by Launch Template"}
-	}
-	if includeUsedByInstance && includeUsedByLaunchTemplate {
-		header = []string{"ami name", "ami id", "creation date", "snapshot ids", "used by Instance", "used by Launch Template"}
-	}
-	stream := printer.NewStreamTable(i.Output, true, header)
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	// Parse the creation date flags
 	var beforeCreationDate, afterCreationDate *time.Time
 	dateLayout := "2006-01-02"
-	if (*extras)["creation-date-before"].(string) != "" {
-		t, err := time.Parse(dateLayout, (*extras)["creation-date-before"].(string))
+	if s := (*extras)["creation-date-before"].(string); s != "" {
+		t, err := time.Parse(dateLayout, s)
 		if err != nil {
-			i.Logger.LogError("Error parsing creation date", err, nil, false)
-			return err
+			return fmt.Errorf("invalid creation-date-before: %w", err)
 		}
 		beforeCreationDate = &t
 	}
-	if (*extras)["creation-date-after"].(string) != "" {
-		t, err := time.Parse(dateLayout, (*extras)["creation-date-after"].(string))
+	if s := (*extras)["creation-date-after"].(string); s != "" {
+		t, err := time.Parse(dateLayout, s)
 		if err != nil {
-			i.Logger.LogError("Error parsing creation date", err, nil, false)
-			return err
+			return fmt.Errorf("invalid creation-date-after: %w", err)
 		}
 		afterCreationDate = &t
 	}
 
-	// -------------------------------------------------------------------------
-	// Fast path: compute usage sets once (instances + launch templates),
-	// instead of per-image DescribeInstances / DescribeLaunchTemplateVersions.
-	// This reduces API calls from O(#images) to O(#instances + #launch-templates).
-	// -------------------------------------------------------------------------
-	type usage struct {
-		count    int
-		examples []string // bounded
-	}
-	const maxExamples = 10
-
-	usedByInstances := make(map[string]*usage, 1024)       // imageID -> usage
-	usedByLaunchTemplates := make(map[string]*usage, 1024) // imageID -> usage
+	usedByInstances := make(map[string]*imageUsage, 1024)
+	usedByLaunchTemplates := make(map[string]*imageUsage, 1024)
 	var instMu, ltMu sync.Mutex
 
-	addUsage := func(m map[string]*usage, mu *sync.Mutex, imageID string, example string) {
+	headers := []string{"ami name", "ami id", "creation date", "snapshot ids"}
+	if includeUsedByInstance && !includeUsedByLaunchTemplate {
+		headers = append(headers, "used by Instance")
+	}
+	if !includeUsedByInstance && includeUsedByLaunchTemplate {
+		headers = append(headers, "used by Launch Template")
+	}
+	if includeUsedByInstance && includeUsedByLaunchTemplate {
+		headers = append(headers, "used by Instance", "used by Launch Template")
+	}
+
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[ec2types.Image, orphanImage]{
+		Headers:       headers,
+		ResourceLabel: "AMIs",
+		PreScan: func(ctx context.Context) error {
+			return a.scanImageUsage(ctx, scanImageUsageOpts{
+				includeUsedByInstance:       includeUsedByInstance,
+				includeUsedByLaunchTemplate: includeUsedByLaunchTemplate,
+				instances:                   usedByInstances,
+				launchTemplates:             usedByLaunchTemplates,
+				instMu:                      &instMu,
+				ltMu:                        &ltMu,
+			})
+		},
+		List: func(ctx context.Context, emit func(ec2types.Image) error) error {
+			imageFilters := []ec2types.Filter{}
+			if filterByName != "" {
+				imageFilters = append(imageFilters, ec2types.Filter{
+					Name:   aws.String("name"),
+					Values: []string{filterByName},
+				})
+			}
+			p := ec2.NewDescribeImagesPaginator(a.AWSClient.EC2, &ec2.DescribeImagesInput{
+				Owners:  []string{"self"},
+				Filters: imageFilters,
+			})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, img := range page.Images {
+					if err := emit(img); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, img ec2types.Image) (*orphanImage, error) {
+			if img.ImageId == nil || img.Name == nil || img.CreationDate == nil {
+				return nil, nil
+			}
+			imageID := *img.ImageId
+			usedInst := usedByInstances[imageID] != nil && usedByInstances[imageID].count > 0
+			usedLT := usedByLaunchTemplates[imageID] != nil && usedByLaunchTemplates[imageID].count > 0
+
+			// Show an image when the user-allowed columns cover its usage:
+			// orphans (neither flag) are always allowed; instance-used rows
+			// require --include-used-by-instance; LT-used rows require
+			// --include-used-by-launch-template.
+			if (usedInst && !includeUsedByInstance) || (usedLT && !includeUsedByLaunchTemplate) {
+				return nil, nil
+			}
+
+			createdAt, err := time.Parse(time.RFC3339, *img.CreationDate)
+			if err != nil {
+				return nil, nil
+			}
+			if beforeCreationDate != nil && createdAt.After(*beforeCreationDate) {
+				return nil, nil
+			}
+			if afterCreationDate != nil && createdAt.Before(*afterCreationDate) {
+				return nil, nil
+			}
+
+			return &orphanImage{
+				name:             *img.Name,
+				id:               imageID,
+				creationDate:     *img.CreationDate,
+				snapshotIDs:      getSnapshotIds(img),
+				usedByInstance:   formatUsage(usedByInstances[imageID]),
+				usedByLaunchTmpl: formatUsage(usedByLaunchTemplates[imageID]),
+			}, nil
+		},
+		ToRow: func(r orphanImage) []any {
+			base := []any{r.name, r.id, r.creationDate, strings.Join(r.snapshotIDs, "\n")}
+			switch {
+			case includeUsedByInstance && includeUsedByLaunchTemplate:
+				base = append(base, r.usedByInstance, r.usedByLaunchTmpl)
+			case includeUsedByInstance:
+				base = append(base, r.usedByInstance)
+			case includeUsedByLaunchTemplate:
+				base = append(base, r.usedByLaunchTmpl)
+			}
+			return base
+		},
+		Delete: func(ctx context.Context, r orphanImage) error {
+			a.Logger.LogInfo("Deleting AMI", map[string]any{"amiID": r.id})
+			if _, err := a.AWSClient.EC2.DeregisterImage(ctx, &ec2.DeregisterImageInput{ImageId: aws.String(r.id)}); err != nil {
+				return err
+			}
+			if err := a.waitForImageDeregistration(ctx, r.id); err != nil {
+				return err
+			}
+			for _, snapshot := range r.snapshotIDs {
+				if snapshot == "" {
+					continue
+				}
+				if _, err := a.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshot)}); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		DeleteConcurrency: 5,
+		DedupKey:          func(r orphanImage) string { return r.id },
+	})
+}
+
+type scanImageUsageOpts struct {
+	includeUsedByInstance       bool
+	includeUsedByLaunchTemplate bool
+	instances                   map[string]*imageUsage
+	launchTemplates             map[string]*imageUsage
+	instMu                      *sync.Mutex
+	ltMu                        *sync.Mutex
+}
+
+func (a *AWSCommand) scanImageUsage(ctx context.Context, opts scanImageUsageOpts) error {
+	g, gctx := errgroup.WithContext(ctx)
+
+	addUsage := func(m map[string]*imageUsage, mu *sync.Mutex, imageID, example string) {
 		if imageID == "" {
 			return
 		}
@@ -128,34 +242,18 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 		defer mu.Unlock()
 		u := m[imageID]
 		if u == nil {
-			u = &usage{examples: make([]string, 0, maxExamples)}
+			u = &imageUsage{examples: make([]string, 0, 10)}
 			m[imageID] = u
 		}
 		u.count++
-		if example != "" && len(u.examples) < maxExamples {
+		if example != "" && len(u.examples) < 10 {
 			u.examples = append(u.examples, example)
 		}
 	}
 
-	formatUsage := func(u *usage) string {
-		if u == nil || u.count == 0 {
-			return ""
-		}
-		if len(u.examples) == 0 {
-			return fmt.Sprintf("%d", u.count)
-		}
-		if u.count > len(u.examples) {
-			return strings.Join(u.examples, "\n") + fmt.Sprintf("\n...(+%d more)", u.count-len(u.examples))
-		}
-		return strings.Join(u.examples, "\n")
-	}
-
-	usageGroup, usageCtx := errgroup.WithContext(ctx)
-
-	// Scan instances once (only if needed for filtering/output)
-	if !includeUsedByLaunchTemplate || includeUsedByInstance {
-		usageGroup.Go(func() error {
-			p := ec2.NewDescribeInstancesPaginator(i.AWSClient.EC2, &ec2.DescribeInstancesInput{
+	if !opts.includeUsedByLaunchTemplate || opts.includeUsedByInstance {
+		g.Go(func() error {
+			p := ec2.NewDescribeInstancesPaginator(a.AWSClient.EC2, &ec2.DescribeInstancesInput{
 				Filters: []ec2types.Filter{
 					{
 						Name:   aws.String("instance-state-name"),
@@ -165,24 +263,22 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 			})
 			pages := 0
 			for p.HasMorePages() {
-				page, err := p.NextPage(usageCtx)
+				page, err := p.NextPage(gctx)
 				if err != nil {
 					return err
 				}
 				pages++
 				if pages%25 == 0 {
-					i.Logger.LogInfo("Scanning instances for AMI usage…", map[string]any{"pages": pages})
+					a.Logger.LogInfo("Scanning instances for AMI usage", map[string]any{"pages": pages})
 				}
 				for _, res := range page.Reservations {
 					for _, inst := range res.Instances {
 						imageID := aws.ToString(inst.ImageId)
-						instID := aws.ToString(inst.InstanceId)
-						// Only store examples when user asked for usage columns.
 						ex := ""
-						if includeUsedByInstance {
-							ex = instID
+						if opts.includeUsedByInstance {
+							ex = aws.ToString(inst.InstanceId)
 						}
-						addUsage(usedByInstances, &instMu, imageID, ex)
+						addUsage(opts.instances, opts.instMu, imageID, ex)
 					}
 				}
 			}
@@ -190,25 +286,23 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 		})
 	}
 
-	// Scan launch template default versions once (only if needed for filtering/output)
-	if !includeUsedByInstance || includeUsedByLaunchTemplate {
-		usageGroup.Go(func() error {
+	if !opts.includeUsedByInstance || opts.includeUsedByLaunchTemplate {
+		g.Go(func() error {
 			ltChan := make(chan ec2types.LaunchTemplate, 50)
-			g, ltCtx := errgroup.WithContext(usageCtx)
+			inner, ictx := errgroup.WithContext(gctx)
 
-			// Producer: list launch templates
-			g.Go(func() error {
+			inner.Go(func() error {
 				defer close(ltChan)
-				p := ec2.NewDescribeLaunchTemplatesPaginator(i.AWSClient.EC2, &ec2.DescribeLaunchTemplatesInput{})
+				p := ec2.NewDescribeLaunchTemplatesPaginator(a.AWSClient.EC2, &ec2.DescribeLaunchTemplatesInput{})
 				for p.HasMorePages() {
-					page, err := p.NextPage(ltCtx)
+					page, err := p.NextPage(ictx)
 					if err != nil {
 						return err
 					}
 					for _, lt := range page.LaunchTemplates {
 						select {
-						case <-ltCtx.Done():
-							return ltCtx.Err()
+						case <-ictx.Done():
+							return ictx.Err()
 						case ltChan <- lt:
 						}
 					}
@@ -216,19 +310,16 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 				return nil
 			})
 
-			// Workers: fetch $Default versions
 			for range NumGoroutines {
-				g.Go(func() error {
+				inner.Go(func() error {
 					for {
 						select {
-						case <-ltCtx.Done():
-							return ltCtx.Err()
+						case <-ictx.Done():
+							return ictx.Err()
 						case lt, ok := <-ltChan:
 							if !ok {
 								return nil
 							}
-
-							// Preserve legacy exclusion: skip launch templates with any tag key containing "karpenter".
 							shouldProcess := true
 							for _, tag := range lt.Tags {
 								if strings.Contains(aws.ToString(tag.Key), "karpenter") {
@@ -239,18 +330,16 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 							if !shouldProcess {
 								continue
 							}
-
 							ltID := aws.ToString(lt.LaunchTemplateId)
 							if ltID == "" {
 								continue
 							}
-
-							pv := ec2.NewDescribeLaunchTemplateVersionsPaginator(i.AWSClient.EC2, &ec2.DescribeLaunchTemplateVersionsInput{
+							pv := ec2.NewDescribeLaunchTemplateVersionsPaginator(a.AWSClient.EC2, &ec2.DescribeLaunchTemplateVersionsInput{
 								LaunchTemplateId: aws.String(ltID),
 								Versions:         []string{"$Default"},
 							})
 							for pv.HasMorePages() {
-								vp, err := pv.NextPage(ltCtx)
+								vp, err := pv.NextPage(ictx)
 								if err != nil {
 									return err
 								}
@@ -260,10 +349,10 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 									}
 									imageID := aws.ToString(ver.LaunchTemplateData.ImageId)
 									ex := ""
-									if includeUsedByLaunchTemplate {
+									if opts.includeUsedByLaunchTemplate {
 										ex = ltID
 									}
-									addUsage(usedByLaunchTemplates, &ltMu, imageID, ex)
+									addUsage(opts.launchTemplates, opts.ltMu, imageID, ex)
 								}
 							}
 						}
@@ -271,187 +360,54 @@ func (i *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 				})
 			}
 
-			return g.Wait()
+			return inner.Wait()
 		})
 	}
 
-	if err := usageGroup.Wait(); err != nil {
-		i.Logger.LogError("Error collecting AMI usage", err, nil, false)
-		return err
-	}
-
-	// -------------------------------------------------------------------------
-	// Describe images and stream results
-	// -------------------------------------------------------------------------
-	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
-	imageFilters := []ec2types.Filter{}
-	if filterByName != "" {
-		imageFilters = append(imageFilters, ec2types.Filter{
-			Name:   aws.String("name"),
-			Values: []string{filterByName},
-		})
-	}
-
-	imgPaginator := ec2.NewDescribeImagesPaginator(i.AWSClient.EC2, &ec2.DescribeImagesInput{
-		Owners:  []string{"self"},
-		Filters: imageFilters,
-	})
-
-	for imgPaginator.HasMorePages() {
-		page, err := imgPaginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, img := range page.Images {
-			if img.ImageId == nil || img.Name == nil || img.CreationDate == nil {
-				continue
-			}
-
-			imageID := *img.ImageId
-			usedInst := usedByInstances[imageID] != nil && usedByInstances[imageID].count > 0
-			usedLT := usedByLaunchTemplates[imageID] != nil && usedByLaunchTemplates[imageID].count > 0
-
-			// Apply legacy include rules:
-			// - default: show only orphans
-			// - include-used-by-instance: show instance-used + orphans (exclude LT-only)
-			// - include-used-by-launch-template: show LT-used + orphans (exclude instance-only)
-			// - both: show all
-			show := false
-			switch {
-			case includeUsedByInstance && includeUsedByLaunchTemplate:
-				show = true
-			case includeUsedByInstance && !includeUsedByLaunchTemplate:
-				show = usedInst || (!usedInst && !usedLT)
-			case !includeUsedByInstance && includeUsedByLaunchTemplate:
-				show = usedLT || (!usedInst && !usedLT)
-			default:
-				show = !usedInst && !usedLT
-			}
-			if !show {
-				continue
-			}
-
-			// Parse creation date for before/after filters
-			createdAt, err := time.Parse(time.RFC3339, *img.CreationDate)
-			if err != nil {
-				continue
-			}
-			if beforeCreationDate != nil && createdAt.After(*beforeCreationDate) {
-				continue
-			}
-			if afterCreationDate != nil && createdAt.Before(*afterCreationDate) {
-				continue
-			}
-
-			snapshotIds := getSnapshotIds(img)
-			base := []any{*img.Name, imageID, *img.CreationDate, strings.Join(snapshotIds, "\n")}
-
-			if includeUsedByInstance && !includeUsedByLaunchTemplate {
-				base = append(base, formatUsage(usedByInstances[imageID]))
-			} else if !includeUsedByInstance && includeUsedByLaunchTemplate {
-				base = append(base, formatUsage(usedByLaunchTemplates[imageID]))
-			} else if includeUsedByInstance && includeUsedByLaunchTemplate {
-				base = append(base, formatUsage(usedByInstances[imageID]), formatUsage(usedByLaunchTemplates[imageID]))
-			}
-
-			stream.WriteRow(base...)
-
-			if collectDeletes {
-				deleteCandidates = append(deleteCandidates, imageDeleteCandidate{
-					imageID:     imageID,
-					snapshotIDs: snapshotIds,
-				})
-			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteCandidates) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(i.Prompter, i.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, candidate := range deleteCandidates {
-			i.Logger.LogInfo("Deleting AMI", map[string]any{"amiID": candidate.imageID})
-			if _, err := i.AWSClient.EC2.DeregisterImage(rootCtx, &ec2.DeregisterImageInput{ImageId: aws.String(candidate.imageID)}); err != nil {
-				return err
-			}
-			if err := i.waitForImageDeregistration(rootCtx, candidate.imageID); err != nil {
-				return err
-			}
-			for _, snapshot := range candidate.snapshotIDs {
-				if snapshot == "" {
-					continue
-				}
-				if _, err := i.AWSClient.EC2.DeleteSnapshot(rootCtx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(snapshot)}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	return nil
+	return g.Wait()
 }
 
-func init() {
-	imagesCmd.PersistentFlags().String("creation-date-before", "", "The time when the image was created, in the UTC time zone (YYYY-MM-DD), for example, 2021-09-29.")
-
-	imagesCmd.PersistentFlags().String("creation-date-after", "", "The time when the image was created, in the UTC time zone (YYYY-MM-DD), for example, 2021-09-29.")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// imagesCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-	imagesCmd.Flags().String("filter-by-name", "", "Filter AMIs by name (empty = no filter).")
-	imagesCmd.Flags().Bool("include-used-by-instance", false, "Include images that are used by instances.")
-	imagesCmd.Flags().Bool("include-used-by-launch-template", false, "Include images that are used by launch templates.")
+func formatUsage(u *imageUsage) string {
+	if u == nil || u.count == 0 {
+		return ""
+	}
+	if len(u.examples) == 0 {
+		return fmt.Sprintf("%d", u.count)
+	}
+	if u.count > len(u.examples) {
+		return strings.Join(u.examples, "\n") + fmt.Sprintf("\n...(+%d more)", u.count-len(u.examples))
+	}
+	return strings.Join(u.examples, "\n")
 }
 
-func (i *AWSCommand) waitForImageDeregistration(ctx context.Context, imageID string) error {
+func (a *AWSCommand) waitForImageDeregistration(ctx context.Context, imageID string) error {
 	for {
-		input := &ec2.DescribeImagesInput{
+		result, err := a.AWSClient.EC2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 			ImageIds: []string{imageID},
-		}
-
-		result, err := i.AWSClient.EC2.DescribeImages(ctx, input)
+		})
 		if err != nil {
 			var apiErr smithy.APIError
 			if errors.As(err, &apiErr) {
 				if apiErr.ErrorCode() == "InvalidAMIID.NotFound" {
-					// Image not found, proceed
 					return nil
-				} else {
-					// Handle other API errors
-					return fmt.Errorf("API error describing image: %w", err)
 				}
-			} else {
-				// Non-API error occurred
-				return fmt.Errorf("unexpected error describing image: %w", err)
+				return fmt.Errorf("API error describing image: %w", err)
 			}
+			return fmt.Errorf("unexpected error describing image: %w", err)
 		}
-
 		if len(result.Images) == 0 {
-			// Image not found, proceed
 			return nil
 		}
-
-		image := result.Images[0]
-
-		if image.State == ec2types.ImageStateDeregistered {
-			// Image is deregistered, proceed
+		if result.Images[0].State == ec2types.ImageStateDeregistered {
 			return nil
 		}
-
-		// Wait before retrying
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
-
-// deleteImages removed: deletion is now handled in streaming mode to avoid buffering.
 
 func getSnapshotIds(image ec2types.Image) []string {
 	snapshotIds := make([]string, 0, len(image.BlockDeviceMappings))

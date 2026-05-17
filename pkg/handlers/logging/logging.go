@@ -17,50 +17,59 @@ limitations under the License.
 package logging
 
 import (
-	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"os"
-	"strings"
 )
 
-// Logger is a structured logger.
+// Logger wraps slog for backward-compatible LogInfo/LogError calls plus
+// structured key/value context.
 type Logger struct {
-	logger *log.Logger
+	slog *slog.Logger
 }
 
-// NewLogger creates a new Logger instance.
+// NewLogger returns a Logger that writes text-format records to stdout. Kept
+// as a zero-arg constructor for backward compatibility with existing call
+// sites that don't have a format/out preference.
 func NewLogger() *Logger {
-	return &Logger{
-		logger: log.New(os.Stdout, "", log.LstdFlags),
-	}
+	return NewLoggerWithFormat("text", os.Stdout)
 }
 
-// LogError logs an error with a message and context.
-func (l *Logger) LogError(message string, err error, context map[string]any, exit bool) {
-	var logMessage strings.Builder
-	logMessage.WriteString(message)
+// NewLoggerWithFormat builds a Logger that writes records to `out` in either
+// "json" or "text" format. Unknown formats fall back to text.
+func NewLoggerWithFormat(format string, out io.Writer) *Logger {
+	var h slog.Handler
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	if format == "json" {
+		h = slog.NewJSONHandler(out, opts)
+	} else {
+		h = slog.NewTextHandler(out, opts)
+	}
+	return &Logger{slog: slog.New(h)}
+}
+
+// LogError logs an error with a message and structured context. Callers decide
+// on termination — this function never calls os.Exit.
+func (l *Logger) LogError(message string, err error, context map[string]any) {
+	attrs := mapToAttrs(context)
 	if err != nil {
-		logMessage.WriteString(": " + err.Error())
+		attrs = append(attrs, slog.String("error", err.Error()))
 	}
-	if context != nil {
-		logMessage.WriteString(" | Context: ")
-		for key, value := range context {
-			fmt.Fprintf(&logMessage, "%s=%v ", key, value)
-		}
-	}
-	l.logger.Println(logMessage.String())
-	// Do not exit the process here; callers should decide on termination.
+	l.slog.Error(message, attrs...)
 }
 
-// LogInfo logs an informational message with context.
+// LogInfo logs an informational message with structured context.
 func (l *Logger) LogInfo(message string, context map[string]any) {
-	var logMessage strings.Builder
-	logMessage.WriteString(message)
-	if context != nil {
-		logMessage.WriteString(" | Context: ")
-		for key, value := range context {
-			fmt.Fprintf(&logMessage, "%s=%v ", key, value)
-		}
+	l.slog.Info(message, mapToAttrs(context)...)
+}
+
+func mapToAttrs(ctx map[string]any) []any {
+	if len(ctx) == 0 {
+		return nil
 	}
-	l.logger.Println(logMessage.String())
+	out := make([]any, 0, 2*len(ctx))
+	for k, v := range ctx {
+		out = append(out, k, v)
+	}
+	return out
 }

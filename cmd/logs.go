@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package cmd
 
 import (
@@ -21,12 +22,17 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	cwltypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
+
+type orphanLogGroup struct {
+	name      string
+	storedStr string
+	retention string
+}
 
 var logsCmd = &cobra.Command{
 	Use:   "logs",
@@ -48,99 +54,63 @@ func init() {
 	logsCmd.Flags().String("filter-by-name", "", "Filter log groups by name prefix")
 }
 
-type logGroupRes struct {
-	Name      string
-	Stored    int64
-	Retention string
-}
-
-func (c *AWSCommand) executeLogs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	collectDeletes := globals.Delete
-	deleteNames := make([]string, 0)
-
-	resChan := make(chan logGroupRes, 100)
-	g, ctx := errgroup.WithContext(ctx)
-
-	// Producer
-	g.Go(func() error {
-		defer close(resChan)
-		input := &cloudwatchlogs.DescribeLogGroupsInput{}
-		if prefix, ok := (*extras)["filter-by-name"].(string); ok && prefix != "" {
-			input.LogGroupNamePrefix = aws.String(prefix)
-		}
-
-		paginator := cloudwatchlogs.NewDescribeLogGroupsPaginator(c.AWSClient.CWL, input)
-		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(ctx)
-			if err != nil {
-				return err
-			}
-			for _, lg := range page.LogGroups {
-				retention := "Never Expire"
-				if lg.RetentionInDays != nil {
-					retention = fmt.Sprintf("Expires in %d days", *lg.RetentionInDays)
-				}
-				stored := int64(0)
-				if lg.StoredBytes != nil {
-					stored = *lg.StoredBytes
-				}
-
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case resChan <- logGroupRes{
-					Name:      aws.ToString(lg.LogGroupName),
-					Stored:    stored,
-					Retention: retention,
-				}:
-				}
-			}
-		}
-		return nil
-	})
-
-	stream := printer.NewStreamTable(c.Output, true, []string{"Log Group Name", "Stored Bytes", "Retention"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	for res := range resChan {
-		sizeStr := fmt.Sprintf("%d B", res.Stored)
-		if res.Stored > 1024*1024 {
-			sizeStr = fmt.Sprintf("%d MB", res.Stored/(1024*1024))
-		}
-		stream.WriteRow(res.Name, sizeStr, res.Retention)
-
-		if collectDeletes {
-			deleteNames = append(deleteNames, res.Name)
-		}
+func (a *AWSCommand) executeLogs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	prefix := ""
+	if p, ok := (*extras)["filter-by-name"].(string); ok {
+		prefix = p
 	}
 
-	if err := g.Wait(); err != nil {
-		c.Logger.LogError("Error processing Log Groups", err, nil, false)
-		return err
-	}
-
-	if collectDeletes {
-		if len(deleteNames) == 0 {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[cwltypes.LogGroup, orphanLogGroup]{
+		Headers:       []string{"Log Group Name", "Stored Bytes", "Retention"},
+		ResourceLabel: "log groups",
+		List: func(ctx context.Context, emit func(cwltypes.LogGroup) error) error {
+			input := &cloudwatchlogs.DescribeLogGroupsInput{}
+			if prefix != "" {
+				input.LogGroupNamePrefix = aws.String(prefix)
+			}
+			p := cloudwatchlogs.NewDescribeLogGroupsPaginator(a.AWSClient.CWL, input)
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, lg := range page.LogGroups {
+					if err := emit(lg); err != nil {
+						return err
+					}
+				}
+			}
 			return nil
-		}
-		confirm, err := confirmDelete(c.Prompter, c.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, name := range deleteNames {
-			c.Logger.LogInfo("Deleting Log Group", map[string]any{"Name": name})
-			_, err := c.AWSClient.DeleteLogGroup(ctx, &cloudwatchlogs.DeleteLogGroupInput{
-				LogGroupName: aws.String(name),
+		},
+		Process: func(_ context.Context, lg cwltypes.LogGroup) (*orphanLogGroup, error) {
+			retention := "Never Expire"
+			if lg.RetentionInDays != nil {
+				retention = fmt.Sprintf("Expires in %d days", *lg.RetentionInDays)
+			}
+			stored := int64(0)
+			if lg.StoredBytes != nil {
+				stored = *lg.StoredBytes
+			}
+			storedStr := fmt.Sprintf("%d B", stored)
+			if stored > 1024*1024 {
+				storedStr = fmt.Sprintf("%d MB", stored/(1024*1024))
+			}
+			return &orphanLogGroup{
+				name:      aws.ToString(lg.LogGroupName),
+				storedStr: storedStr,
+				retention: retention,
+			}, nil
+		},
+		ToRow: func(r orphanLogGroup) []any {
+			return []any{r.name, r.storedStr, r.retention}
+		},
+		Delete: func(ctx context.Context, r orphanLogGroup) error {
+			a.Logger.LogInfo("Deleting Log Group", map[string]any{"Name": r.name})
+			_, err := a.AWSClient.CWL.DeleteLogGroup(ctx, &cloudwatchlogs.DeleteLogGroupInput{
+				LogGroupName: aws.String(r.name),
 			})
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+			return err
+		},
+		DeleteConcurrency: 10,
+	})
 }

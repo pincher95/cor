@@ -18,16 +18,21 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 )
+
+type orphanVPNConnection struct {
+	id        string
+	state     string
+	gateway   string
+	tunnelsUp int
+}
 
 var vpnConnectionsCmd = &cobra.Command{
 	Use:   "vpnconnections",
@@ -51,66 +56,61 @@ func init() {
 	vpnConnectionsCmd.Flags().Bool("include-up", false, "Include VPN connections with tunnels up.")
 }
 
-func (v *AWSCommand) executeVPNConnections(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := globals.Delete
+func (a *AWSCommand) executeVPNConnections(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByID := normalizeFilterValue((*extras)["filter-by-id"].(string))
 	includeUp := (*extras)["include-up"].(bool)
 
-	stream := printer.NewStreamTable(v.Output, true, []string{"VPN ID", "State", "Gateway", "TunnelsUp"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	deleteIDs := make([]string, 0)
-	page, err := v.AWSClient.EC2.DescribeVpnConnections(ctx, &ec2.DescribeVpnConnectionsInput{})
-	if err != nil {
-		return err
-	}
-	for _, vpn := range page.VpnConnections {
-		vpnID := aws.ToString(vpn.VpnConnectionId)
-		if filterByID != "" && !strings.Contains(vpnID, filterByID) {
-			continue
-		}
-		tunnelsUp := countVPNTunnelsUp(vpn)
-		if !includeUp && tunnelsUp > 0 {
-			continue
-		}
-		state := string(vpn.State)
-		gateway := "-"
-		if vpn.VpnGatewayId != nil {
-			gateway = aws.ToString(vpn.VpnGatewayId)
-		} else if vpn.TransitGatewayId != nil {
-			gateway = aws.ToString(vpn.TransitGatewayId)
-		}
-
-		stream.WriteRow(vpnID, state, gateway, tunnelsUp)
-		if collectDeletes && tunnelsUp == 0 {
-			deleteIDs = append(deleteIDs, vpnID)
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(v.Prompter, v.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, id := range deleteIDs {
-			v.Logger.LogInfo("Deleting VPN connection", map[string]any{"VpnConnectionId": id})
-			if _, err := v.AWSClient.EC2.DeleteVpnConnection(rootCtx, &ec2.DeleteVpnConnectionInput{
-				VpnConnectionId: aws.String(id),
-			}); err != nil {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[ec2types.VpnConnection, orphanVPNConnection]{
+		Headers:       []string{"VPN ID", "State", "Gateway", "TunnelsUp"},
+		ResourceLabel: "Site-to-Site VPN connections",
+		List: func(ctx context.Context, emit func(ec2types.VpnConnection) error) error {
+			page, err := a.AWSClient.EC2.DescribeVpnConnections(ctx, &ec2.DescribeVpnConnectionsInput{})
+			if err != nil {
 				return err
 			}
-		}
-	}
-
-	return nil
+			for _, vpn := range page.VpnConnections {
+				if err := emit(vpn); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, vpn ec2types.VpnConnection) (*orphanVPNConnection, error) {
+			vpnID := aws.ToString(vpn.VpnConnectionId)
+			if !matchesFilterValue(vpnID, filterByID) {
+				return nil, nil
+			}
+			tunnelsUp := countVPNTunnelsUp(vpn)
+			if !includeUp && tunnelsUp > 0 {
+				return nil, nil
+			}
+			gateway := "-"
+			if vpn.VpnGatewayId != nil {
+				gateway = aws.ToString(vpn.VpnGatewayId)
+			} else if vpn.TransitGatewayId != nil {
+				gateway = aws.ToString(vpn.TransitGatewayId)
+			}
+			return &orphanVPNConnection{
+				id:        vpnID,
+				state:     string(vpn.State),
+				gateway:   gateway,
+				tunnelsUp: tunnelsUp,
+			}, nil
+		},
+		ToRow: func(r orphanVPNConnection) []any {
+			return []any{r.id, r.state, r.gateway, r.tunnelsUp}
+		},
+		Delete: func(ctx context.Context, r orphanVPNConnection) error {
+			if r.tunnelsUp > 0 {
+				return nil
+			}
+			a.Logger.LogInfo("Deleting VPN connection", map[string]any{"VpnConnectionId": r.id})
+			_, err := a.AWSClient.EC2.DeleteVpnConnection(ctx, &ec2.DeleteVpnConnectionInput{
+				VpnConnectionId: aws.String(r.id),
+			})
+			return err
+		},
+	})
 }
 
 func countVPNTunnelsUp(vpn ec2types.VpnConnection) int {

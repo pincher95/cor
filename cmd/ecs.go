@@ -90,7 +90,7 @@ func (a *AWSCommand) executeECS(ctx context.Context, globals *flags.GlobalFlags,
 			if err != nil {
 				a.Logger.LogError("Error checking ECS cluster", err, map[string]any{
 					"cluster": clusterARN,
-				}, false)
+				})
 				return nil, nil // skip this cluster, continue the pipeline
 			}
 			return orphan, nil

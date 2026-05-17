@@ -56,10 +56,10 @@ type orphanNatGateway struct {
 	created string
 }
 
-func (c *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+func (a *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	stateFilter := (*extras)["filter-by-state"].(string)
 
-	return runOrphanPipeline(c, ctx, globals, extras, OrphanPipeline[types.NatGateway, orphanNatGateway]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.NatGateway, orphanNatGateway]{
 		Headers:       []string{"Name", "ID", "State", "VPC", "Subnet", "Created"},
 		ResourceLabel: "NAT Gateways",
 		List: func(ctx context.Context, emit func(types.NatGateway) error) error {
@@ -70,7 +70,7 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.Glob
 					Values: []string{stateFilter},
 				})
 			}
-			p := ec2.NewDescribeNatGatewaysPaginator(c.AWSClient.EC2, &ec2.DescribeNatGatewaysInput{Filter: filters})
+			p := ec2.NewDescribeNatGatewaysPaginator(a.AWSClient.EC2, &ec2.DescribeNatGatewaysInput{Filter: filters})
 			for p.HasMorePages() {
 				page, err := p.NextPage(ctx)
 				if err != nil {
@@ -85,12 +85,9 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.Glob
 			return nil
 		},
 		Process: func(_ context.Context, ng types.NatGateway) (*orphanNatGateway, error) {
-			name := "-"
-			for _, tag := range ng.Tags {
-				if tag.Key != nil && *tag.Key == "Name" && tag.Value != nil {
-					name = *tag.Value
-					break
-				}
+			name := ec2NameTag(ng.Tags)
+			if name == "" {
+				name = "-"
 			}
 			return &orphanNatGateway{
 				name:    name,
@@ -105,8 +102,8 @@ func (c *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.Glob
 			return []any{r.name, r.id, r.state, r.vpcID, r.subnet, r.created}
 		},
 		Delete: func(ctx context.Context, r orphanNatGateway) error {
-			c.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": r.id, "Name": r.name})
-			_, err := c.AWSClient.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(r.id)})
+			a.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": r.id, "Name": r.name})
+			_, err := a.AWSClient.EC2.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(r.id)})
 			return err
 		},
 	})

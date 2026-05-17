@@ -18,16 +18,22 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 )
+
+type orphanTGWAttachment struct {
+	id           string
+	resourceType string
+	resourceID   string
+	state        string
+	assocState   string
+}
 
 var tgwAttachmentsCmd = &cobra.Command{
 	Use:   "tgwattachments",
@@ -53,70 +59,65 @@ func init() {
 	tgwAttachmentsCmd.Flags().String("filter-by-resource", "", "Filter by resource ID (substring match).")
 }
 
-func (t *AWSCommand) executeTGWAttachments(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := globals.Delete
+func (a *AWSCommand) executeTGWAttachments(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	includeAssociated := (*extras)["include-associated"].(bool)
 	includeNonVPC := (*extras)["include-non-vpc"].(bool)
 	filterByResource := normalizeFilterValue((*extras)["filter-by-resource"].(string))
 
-	stream := printer.NewStreamTable(t.Output, true, []string{"Attachment ID", "ResourceType", "ResourceId", "State", "AssocState"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	deleteIDs := make([]string, 0)
-	paginator := ec2.NewDescribeTransitGatewayAttachmentsPaginator(t.AWSClient.EC2, &ec2.DescribeTransitGatewayAttachmentsInput{})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, att := range page.TransitGatewayAttachments {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[ec2types.TransitGatewayAttachment, orphanTGWAttachment]{
+		Headers:       []string{"Attachment ID", "ResourceType", "ResourceId", "State", "AssocState"},
+		ResourceLabel: "Transit Gateway attachments",
+		List: func(ctx context.Context, emit func(ec2types.TransitGatewayAttachment) error) error {
+			p := ec2.NewDescribeTransitGatewayAttachmentsPaginator(a.AWSClient.EC2, &ec2.DescribeTransitGatewayAttachmentsInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, att := range page.TransitGatewayAttachments {
+					if err := emit(att); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, att ec2types.TransitGatewayAttachment) (*orphanTGWAttachment, error) {
 			resourceType := string(att.ResourceType)
 			if resourceType != string(ec2types.TransitGatewayAttachmentResourceTypeVpc) && !includeNonVPC {
-				continue
+				return nil, nil
 			}
 			resourceID := aws.ToString(att.ResourceId)
-			if filterByResource != "" && !strings.Contains(resourceID, filterByResource) {
-				continue
+			if !matchesFilterValue(resourceID, filterByResource) {
+				return nil, nil
 			}
 			assocState := "none"
 			if att.Association != nil && att.Association.State != "" {
 				assocState = string(att.Association.State)
 			}
 			if !includeAssociated && assocState == "associated" {
-				continue
+				return nil, nil
 			}
-			state := string(att.State)
-
-			stream.WriteRow(aws.ToString(att.TransitGatewayAttachmentId), resourceType, resourceID, state, assocState)
-
-			if collectDeletes && resourceType == string(ec2types.TransitGatewayAttachmentResourceTypeVpc) && assocState != "associated" {
-				deleteIDs = append(deleteIDs, aws.ToString(att.TransitGatewayAttachmentId))
+			return &orphanTGWAttachment{
+				id:           aws.ToString(att.TransitGatewayAttachmentId),
+				resourceType: resourceType,
+				resourceID:   resourceID,
+				state:        string(att.State),
+				assocState:   assocState,
+			}, nil
+		},
+		ToRow: func(r orphanTGWAttachment) []any {
+			return []any{r.id, r.resourceType, r.resourceID, r.state, r.assocState}
+		},
+		Delete: func(ctx context.Context, r orphanTGWAttachment) error {
+			if r.resourceType != string(ec2types.TransitGatewayAttachmentResourceTypeVpc) || r.assocState == "associated" {
+				return nil
 			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(t.Prompter, t.Logger)
-		if err != nil {
+			a.Logger.LogInfo("Deleting TGW VPC attachment", map[string]any{"AttachmentId": r.id})
+			_, err := a.AWSClient.EC2.DeleteTransitGatewayVpcAttachment(ctx, &ec2.DeleteTransitGatewayVpcAttachmentInput{
+				TransitGatewayAttachmentId: aws.String(r.id),
+			})
 			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, id := range deleteIDs {
-			t.Logger.LogInfo("Deleting TGW VPC attachment", map[string]any{"AttachmentId": id})
-			if _, err := t.AWSClient.EC2.DeleteTransitGatewayVpcAttachment(rootCtx, &ec2.DeleteTransitGatewayVpcAttachmentInput{
-				TransitGatewayAttachmentId: aws.String(id),
-			}); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+		},
+	})
 }

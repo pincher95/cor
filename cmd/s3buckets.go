@@ -93,7 +93,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.Global
 			if err != nil {
 				a.Logger.LogError("Error checking S3 bucket", err, map[string]any{
 					"bucket": aws.ToString(b.Name),
-				}, false)
+				})
 				return nil, nil
 			}
 			return orphan, nil
@@ -118,7 +118,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.Global
 		Delete: func(ctx context.Context, r orphanS3Bucket) error {
 			if r.IncompleteUploads > 0 {
 				if err := a.abortMultipartUploads(ctx, r.BucketName, r.Region); err != nil {
-					a.Logger.LogError("Failed to abort multipart uploads", err, map[string]any{"bucket": r.BucketName}, false)
+					a.Logger.LogError("Failed to abort multipart uploads", err, map[string]any{"bucket": r.BucketName})
 					return err
 				}
 			}
@@ -128,7 +128,7 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.Global
 			}
 			a.Logger.LogInfo("Deleting S3 bucket", map[string]any{"bucket": r.BucketName})
 			if err := a.deleteS3Bucket(ctx, r.BucketName, r.Region); err != nil {
-				a.Logger.LogError("Failed to delete S3 bucket", err, map[string]any{"bucket": r.BucketName}, false)
+				a.Logger.LogError("Failed to delete S3 bucket", err, map[string]any{"bucket": r.BucketName})
 				return err
 			}
 			return nil

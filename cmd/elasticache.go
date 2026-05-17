@@ -100,7 +100,7 @@ func (a *AWSCommand) executeElastiCache(ctx context.Context, globals *flags.Glob
 			if err != nil {
 				a.Logger.LogError("Error checking ElastiCache cluster", err, map[string]any{
 					"cluster": aws.ToString(c.CacheClusterId),
-				}, false)
+				})
 				return nil, nil
 			}
 			return orphan, nil
@@ -120,7 +120,7 @@ func (a *AWSCommand) executeElastiCache(ctx context.Context, globals *flags.Glob
 		Delete: func(ctx context.Context, r orphanElastiCacheCluster) error {
 			a.Logger.LogInfo("Deleting ElastiCache cluster", map[string]any{"ClusterId": r.ClusterID})
 			if err := a.deleteElastiCacheCluster(ctx, r.ClusterID); err != nil {
-				a.Logger.LogError("Failed to delete ElastiCache cluster", err, map[string]any{"ClusterId": r.ClusterID}, false)
+				a.Logger.LogError("Failed to delete ElastiCache cluster", err, map[string]any{"ClusterId": r.ClusterID})
 				return err
 			}
 			return nil

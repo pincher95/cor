@@ -47,6 +47,13 @@ func TestRunResourceCommand_HappyPath(t *testing.T) {
 	cmd.PersistentFlags().Bool("delete", false, "")
 	cmd.PersistentFlags().String("sort-by", "", "")
 	cmd.PersistentFlags().Bool("sort-desc", false, "")
+	cmd.PersistentFlags().Bool("yes", false, "")
+	cmd.PersistentFlags().String("on-error", "stop", "")
+	cmd.PersistentFlags().String("log-format", "text", "")
+	cmd.PersistentFlags().String("metrics-file", "", "")
+	cmd.PersistentFlags().Bool("dry-run", false, "")
+	cmd.PersistentFlags().String("format", "table", "")
+	cmd.PersistentFlags().String("state-file", "", "")
 	cmd.Flags().String("filter-by-name", "", "")
 	cmd.SetContext(context.Background())
 
@@ -135,7 +142,7 @@ func TestRunResourceCommand_HappyPath(t *testing.T) {
 	if _, ok := (*capturedExtras)["filter-by-name"]; !ok {
 		t.Errorf("expected extras to contain 'filter-by-name'")
 	}
-	for _, globalKey := range []string{"region", "profile", "auth-method", "delete", "sort-by", "sort-desc"} {
+	for _, globalKey := range []string{"region", "profile", "auth-method", "delete", "sort-by", "sort-desc", "yes", "on-error", "log-format", "metrics-file", "dry-run", "format", "state-file"} {
 		if _, ok := (*capturedExtras)[globalKey]; ok {
 			t.Errorf("extras should not contain global key %q", globalKey)
 		}

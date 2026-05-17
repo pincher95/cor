@@ -18,17 +18,22 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 )
 
-// autoscalingCmd represents the autoscaling command
+type orphanAutoScalingGroup struct {
+	name              string
+	min, desired, max int32
+	instances, lbs    int
+	targetGroups      int
+}
+
 var autoscalingCmd = &cobra.Command{
 	Use:   "autoscaling",
 	Short: "Delete orphaned AWS Auto Scaling Groups",
@@ -46,98 +51,67 @@ var autoscalingCmd = &cobra.Command{
 	},
 }
 
-func (b *AWSCommand) executeAutoscaling(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	filterByName := (*extras)["filter-by-name"].(string)
-	force := (*extras)["force"].(bool)
-
-	collectDeletes := globals.Delete
-	deleteNames := make([]string, 0)
-
-	paginator := autoscaling.NewDescribeAutoScalingGroupsPaginator(b.AWSClient.ASG, &autoscaling.DescribeAutoScalingGroupsInput{})
-
-	stream := printer.NewStreamTable(b.Output, true, []string{"AutoScalingGroup Name", "Min", "Desired", "Max", "Instances", "LBs", "TargetGroups"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			b.Logger.LogError("failed to describe autoscaling groups", err, nil, false)
-			return err
-		}
-
-		for _, asg := range page.AutoScalingGroups {
-			name := aws.ToString(asg.AutoScalingGroupName)
-			if filterByName != "" && !strings.Contains(name, filterByName) {
-				continue
-			}
-
-			instanceCount := 0
-			if asg.Instances != nil {
-				instanceCount = len(asg.Instances)
-			}
-			lbCount := 0
-			if asg.LoadBalancerNames != nil {
-				lbCount = len(asg.LoadBalancerNames)
-			}
-			tgCount := 0
-			if asg.TargetGroupARNs != nil {
-				tgCount = len(asg.TargetGroupARNs)
-			}
-
-			desired := aws.ToInt32(asg.DesiredCapacity)
-			min := aws.ToInt32(asg.MinSize)
-			max := aws.ToInt32(asg.MaxSize)
-
-			// Strict orphan definition (safer):
-			// - no instances
-			// - desired==0 and min==0
-			// - not attached to any LB or TG
-			if instanceCount != 0 {
-				continue
-			}
-			if desired != 0 || min != 0 {
-				continue
-			}
-			if lbCount != 0 || tgCount != 0 {
-				continue
-			}
-
-			stream.WriteRow(name, min, desired, max, instanceCount, lbCount, tgCount)
-
-			if collectDeletes {
-				deleteNames = append(deleteNames, name)
-			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteNames) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(b.Prompter, b.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, name := range deleteNames {
-			b.Logger.LogInfo("Deleting AutoScalingGroup", map[string]any{"AutoScalingGroupName": name, "ForceDelete": force})
-			if _, err := b.AWSClient.ASG.DeleteAutoScalingGroup(ctx, &autoscaling.DeleteAutoScalingGroupInput{
-				AutoScalingGroupName: aws.String(name),
-				ForceDelete:          aws.Bool(force),
-			}); err != nil {
-				b.Logger.LogError("Error deleting autoscaling group", err, map[string]any{"AutoScalingGroupName": name}, false)
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
 func init() {
 	autoscalingCmd.Flags().String("filter-by-name", "", "Filter by Auto Scaling Group name (substring match).")
 	autoscalingCmd.Flags().Bool("force", false, "Force delete ASG (use with caution).")
+}
+
+func (a *AWSCommand) executeAutoscaling(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	filterByName := (*extras)["filter-by-name"].(string)
+	force := (*extras)["force"].(bool)
+
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[autoscalingtypes.AutoScalingGroup, orphanAutoScalingGroup]{
+		Headers:       []string{"AutoScalingGroup Name", "Min", "Desired", "Max", "Instances", "LBs", "TargetGroups"},
+		ResourceLabel: "Auto Scaling Groups",
+		List: func(ctx context.Context, emit func(autoscalingtypes.AutoScalingGroup) error) error {
+			p := autoscaling.NewDescribeAutoScalingGroupsPaginator(a.AWSClient.ASG, &autoscaling.DescribeAutoScalingGroupsInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, asg := range page.AutoScalingGroups {
+					if err := emit(asg); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, asg autoscalingtypes.AutoScalingGroup) (*orphanAutoScalingGroup, error) {
+			name := aws.ToString(asg.AutoScalingGroupName)
+			if !matchesFilterValue(name, filterByName) {
+				return nil, nil
+			}
+			instanceCount := len(asg.Instances)
+			lbCount := len(asg.LoadBalancerNames)
+			tgCount := len(asg.TargetGroupARNs)
+			desired := aws.ToInt32(asg.DesiredCapacity)
+			min := aws.ToInt32(asg.MinSize)
+			max := aws.ToInt32(asg.MaxSize)
+			if instanceCount != 0 || desired != 0 || min != 0 || lbCount != 0 || tgCount != 0 {
+				return nil, nil
+			}
+			return &orphanAutoScalingGroup{
+				name:         name,
+				min:          min,
+				desired:      desired,
+				max:          max,
+				instances:    instanceCount,
+				lbs:          lbCount,
+				targetGroups: tgCount,
+			}, nil
+		},
+		ToRow: func(r orphanAutoScalingGroup) []any {
+			return []any{r.name, r.min, r.desired, r.max, r.instances, r.lbs, r.targetGroups}
+		},
+		Delete: func(ctx context.Context, r orphanAutoScalingGroup) error {
+			a.Logger.LogInfo("Deleting AutoScalingGroup", map[string]any{"AutoScalingGroupName": r.name, "ForceDelete": force})
+			_, err := a.AWSClient.ASG.DeleteAutoScalingGroup(ctx, &autoscaling.DeleteAutoScalingGroupInput{
+				AutoScalingGroupName: aws.String(r.name),
+				ForceDelete:          aws.Bool(force),
+			})
+			return err
+		},
+	})
 }

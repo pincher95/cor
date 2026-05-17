@@ -23,14 +23,28 @@ import (
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 )
 
+// ec2NameTag returns the value of the "Name" tag in tags, or "" if absent or
+// empty. Callers that want a display fallback (typically "-") apply it.
+func ec2NameTag(tags []ec2types.Tag) string {
+	for _, t := range tags {
+		if aws.ToString(t.Key) == "Name" {
+			if v := aws.ToString(t.Value); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
 func confirmDelete(p prompter.Client, logger *logging.Logger) (bool, error) {
 	confirm, err := p.Confirm("Are you sure you want to proceed? (yes/no): ")
 	if err != nil {
-		logger.LogError("Error during user prompt", err, nil, false)
+		logger.LogError("Error during user prompt", err, nil)
 		return false, err
 	}
 	if confirm == nil || !*confirm {

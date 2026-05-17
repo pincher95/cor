@@ -68,79 +68,6 @@ type AWSClientImpl struct {
 	ECS         *ecs.Client
 }
 
-func (c *AWSClientImpl) DescribeVolumes(ctx context.Context, params *ec2.DescribeVolumesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
-	return c.EC2.DescribeVolumes(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteVolume(ctx context.Context, params *ec2.DeleteVolumeInput, optFns ...func(*ec2.Options)) (*ec2.DeleteVolumeOutput, error) {
-	return c.EC2.DeleteVolume(ctx, params, optFns...)
-}
-
-// Similarly, implement ELB methods:
-func (c *AWSClientImpl) DeleteListener(ctx context.Context, params *elasticloadbalancingv2.DeleteListenerInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteListenerOutput, error) {
-	return c.ELB.DeleteListener(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteTargetGroup(ctx context.Context, params *elasticloadbalancingv2.DeleteTargetGroupInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteTargetGroupOutput, error) {
-	return c.ELB.DeleteTargetGroup(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteLoadBalancer(ctx context.Context, params *elasticloadbalancingv2.DeleteLoadBalancerInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DeleteLoadBalancerOutput, error) {
-	return c.ELB.DeleteLoadBalancer(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeLoadBalancers(ctx context.Context, params *elasticloadbalancingv2.DescribeLoadBalancersInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeLoadBalancersOutput, error) {
-	return c.ELB.DescribeLoadBalancers(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeTargetGroups(ctx context.Context, params *elasticloadbalancingv2.DescribeTargetGroupsInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetGroupsOutput, error) {
-	return c.ELB.DescribeTargetGroups(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeTargetHealth(ctx context.Context, params *elasticloadbalancingv2.DescribeTargetHealthInput, optFns ...func(*elasticloadbalancingv2.Options)) (*elasticloadbalancingv2.DescribeTargetHealthOutput, error) {
-	return c.ELB.DescribeTargetHealth(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) GetCallerIdentity(ctx context.Context, params *sts.GetCallerIdentityInput, optFns ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error) {
-	return c.STS.GetCallerIdentity(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeAutoScalingGroups(ctx context.Context, params *autoscaling.DescribeAutoScalingGroupsInput, optFns ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
-	return c.ASG.DescribeAutoScalingGroups(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeNatGateways(ctx context.Context, params *ec2.DescribeNatGatewaysInput, optFns ...func(*ec2.Options)) (*ec2.DescribeNatGatewaysOutput, error) {
-	return c.EC2.DescribeNatGateways(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteNatGateway(ctx context.Context, params *ec2.DeleteNatGatewayInput, optFns ...func(*ec2.Options)) (*ec2.DeleteNatGatewayOutput, error) {
-	return c.EC2.DeleteNatGateway(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeDBInstances(ctx context.Context, params *rds.DescribeDBInstancesInput, optFns ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error) {
-	return c.RDS.DescribeDBInstances(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeDBSnapshots(ctx context.Context, params *rds.DescribeDBSnapshotsInput, optFns ...func(*rds.Options)) (*rds.DescribeDBSnapshotsOutput, error) {
-	return c.RDS.DescribeDBSnapshots(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteDBInstance(ctx context.Context, params *rds.DeleteDBInstanceInput, optFns ...func(*rds.Options)) (*rds.DeleteDBInstanceOutput, error) {
-	return c.RDS.DeleteDBInstance(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteDBSnapshot(ctx context.Context, params *rds.DeleteDBSnapshotInput, optFns ...func(*rds.Options)) (*rds.DeleteDBSnapshotOutput, error) {
-	return c.RDS.DeleteDBSnapshot(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DescribeLogGroups(ctx context.Context, params *cloudwatchlogs.DescribeLogGroupsInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
-	return c.CWL.DescribeLogGroups(ctx, params, optFns...)
-}
-
-func (c *AWSClientImpl) DeleteLogGroup(ctx context.Context, params *cloudwatchlogs.DeleteLogGroupInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DeleteLogGroupOutput, error) {
-	return c.CWL.DeleteLogGroup(ctx, params, optFns...)
-}
-
 // CloudConfig is the configuration for the AWS client
 type CloudConfig struct {
 	AuthMethod *string
@@ -186,7 +113,7 @@ func newRetryer() aws.Retryer {
 	})
 }
 
-// NewConfig initializes AWS Client config
+// NewConfig initializes AWS Client config.
 func NewConfig(ctx context.Context, cloudConfig CloudConfig, timezone string, humanize bool, debug bool) (*aws.Config, error) {
 	switch *cloudConfig.AuthMethod {
 	// case "IAM_ARN":
@@ -196,7 +123,7 @@ func NewConfig(ctx context.Context, cloudConfig CloudConfig, timezone string, hu
 	case "ENV_SECRET":
 		return authenticateEnvSecret(ctx, *cloudConfig.Region)
 	default:
-		return nil, fmt.Errorf("unsupported authentication method")
+		return nil, fmt.Errorf("unsupported auth-method %q (allowed: AWS_CREDENTIALS_FILE, ENV_SECRET)", *cloudConfig.AuthMethod)
 	}
 
 	// stsClient := sts.NewFromConfig(*cfg)
@@ -263,18 +190,3 @@ func authenticateEnvSecret(ctx context.Context, region string) (*aws.Config, err
 
 // Note: we intentionally avoid calling os.Exit or making extra network calls here.
 // Callers can optionally validate credentials via STS if they want a preflight check.
-
-// Confirmation asks user for confirmation.
-// "y" and "Y" returns true and others are false.
-// func (client *Client) Confirmation(message string) (bool, error) {
-// 	fmt.Fprintf(client.stdout, "%s [y/n]: ", message)
-
-// 	reader := bufio.NewReader(client.stdin)
-// 	input, err := reader.ReadString('\n')
-// 	if err != nil {
-// 		return false, errors.Wrap(err, "ReadString failed:")
-// 	}
-
-// 	normalized := strings.ToLower(strings.TrimSpace(input))
-// 	return normalized == "y", nil
-// }

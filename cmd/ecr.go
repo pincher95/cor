@@ -28,10 +28,16 @@ import (
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
+
+type orphanECRImage struct {
+	repository string
+	digest     string
+	tags       string
+	pushedAt   string
+}
 
 var ecrCmd = &cobra.Command{
 	Use:   "ecr",
@@ -57,9 +63,7 @@ func init() {
 	ecrCmd.Flags().String("older-than-days", "", "Include images older than N days (e.g. 30).")
 }
 
-func (e *AWSCommand) executeECR(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := globals.Delete
+func (a *AWSCommand) executeECR(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 	untaggedOnly := (*extras)["untagged-only"].(bool)
 	olderThanDaysStr := strings.TrimSpace((*extras)["older-than-days"].(string))
@@ -75,107 +79,103 @@ func (e *AWSCommand) executeECR(ctx context.Context, globals *flags.GlobalFlags,
 		}
 	}
 
-	stream := printer.NewStreamTable(e.Output, true, []string{"Repository", "ImageDigest", "Tags", "PushedAt"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	deleteMap := make(map[string][]ecrtypes.ImageIdentifier)
-
-	repoPaginator := ecr.NewDescribeRepositoriesPaginator(e.AWSClient.ECR, &ecr.DescribeRepositoriesInput{})
-	for repoPaginator.HasMorePages() {
-		repoPage, err := repoPaginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, repo := range repoPage.Repositories {
-			repoName := aws.ToString(repo.RepositoryName)
-			if filterByName != "" && !strings.Contains(repoName, filterByName) {
-				continue
-			}
-
-			filter := &ecrtypes.DescribeImagesFilter{TagStatus: ecrtypes.TagStatusAny}
-			if cutoff.IsZero() && untaggedOnly {
-				filter.TagStatus = ecrtypes.TagStatusUntagged
-			}
-
-			imgPaginator := ecr.NewDescribeImagesPaginator(e.AWSClient.ECR, &ecr.DescribeImagesInput{
-				RepositoryName: aws.String(repoName),
-				Filter:         filter,
-			})
-
-			for imgPaginator.HasMorePages() {
-				imgPage, err := imgPaginator.NextPage(ctx)
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[orphanECRImage, orphanECRImage]{
+		Headers:       []string{"Repository", "ImageDigest", "Tags", "PushedAt"},
+		ResourceLabel: "ECR images",
+		List: func(ctx context.Context, emit func(orphanECRImage) error) error {
+			repoPaginator := ecr.NewDescribeRepositoriesPaginator(a.AWSClient.ECR, &ecr.DescribeRepositoriesInput{})
+			for repoPaginator.HasMorePages() {
+				repoPage, err := repoPaginator.NextPage(ctx)
 				if err != nil {
 					return err
 				}
-				for _, img := range imgPage.ImageDetails {
-					tags := img.ImageTags
-					pushedAt := img.ImagePushedAt
-
-					include := false
-					if untaggedOnly && len(tags) == 0 {
-						include = true
-					}
-					if !cutoff.IsZero() && pushedAt != nil && pushedAt.Before(cutoff) {
-						include = true
-					}
-
-					if !include {
+				for _, repo := range repoPage.Repositories {
+					repoName := aws.ToString(repo.RepositoryName)
+					if !matchesFilterValue(repoName, filterByName) {
 						continue
 					}
-
-					tagStr := "-"
-					if len(tags) > 0 {
-						tagStr = strings.Join(tags, ",")
+					filter := &ecrtypes.DescribeImagesFilter{TagStatus: ecrtypes.TagStatusAny}
+					if cutoff.IsZero() && untaggedOnly {
+						filter.TagStatus = ecrtypes.TagStatusUntagged
 					}
-					pushedStr := "-"
-					if pushedAt != nil {
-						pushedStr = pushedAt.UTC().Format(time.RFC3339)
-					}
-
-					digest := aws.ToString(img.ImageDigest)
-					stream.WriteRow(repoName, digest, tagStr, pushedStr)
-
-					if collectDeletes && digest != "" {
-						deleteMap[repoName] = append(deleteMap[repoName], ecrtypes.ImageIdentifier{
-							ImageDigest: aws.String(digest),
-						})
+					imgPaginator := ecr.NewDescribeImagesPaginator(a.AWSClient.ECR, &ecr.DescribeImagesInput{
+						RepositoryName: aws.String(repoName),
+						Filter:         filter,
+					})
+					for imgPaginator.HasMorePages() {
+						imgPage, err := imgPaginator.NextPage(ctx)
+						if err != nil {
+							return err
+						}
+						for _, img := range imgPage.ImageDetails {
+							include := false
+							if untaggedOnly && len(img.ImageTags) == 0 {
+								include = true
+							}
+							if !cutoff.IsZero() && img.ImagePushedAt != nil && img.ImagePushedAt.Before(cutoff) {
+								include = true
+							}
+							if !include {
+								continue
+							}
+							tagStr := "-"
+							if len(img.ImageTags) > 0 {
+								tagStr = strings.Join(img.ImageTags, ",")
+							}
+							pushedStr := "-"
+							if img.ImagePushedAt != nil {
+								pushedStr = img.ImagePushedAt.UTC().Format(time.RFC3339)
+							}
+							digest := aws.ToString(img.ImageDigest)
+							if digest == "" {
+								continue
+							}
+							if err := emit(orphanECRImage{
+								repository: repoName,
+								digest:     digest,
+								tags:       tagStr,
+								pushedAt:   pushedStr,
+							}); err != nil {
+								return err
+							}
+						}
 					}
 				}
 			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteMap) == 0 {
 			return nil
-		}
-		confirm, err := confirmDelete(e.Prompter, e.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-
-		for repoName, ids := range deleteMap {
-			for _, chunk := range utils.SliceChunkBy(ids, 100) {
-				if len(chunk) == 0 {
-					continue
-				}
-				out, err := e.AWSClient.ECR.BatchDeleteImage(rootCtx, &ecr.BatchDeleteImageInput{
-					RepositoryName: aws.String(repoName),
-					ImageIds:       chunk,
+		},
+		Process: func(_ context.Context, img orphanECRImage) (*orphanECRImage, error) {
+			return &img, nil
+		},
+		ToRow: func(r orphanECRImage) []any {
+			return []any{r.repository, r.digest, r.tags, r.pushedAt}
+		},
+		DeleteBatch: func(ctx context.Context, rs []orphanECRImage) error {
+			byRepo := make(map[string][]ecrtypes.ImageIdentifier, 8)
+			for _, r := range rs {
+				byRepo[r.repository] = append(byRepo[r.repository], ecrtypes.ImageIdentifier{
+					ImageDigest: aws.String(r.digest),
 				})
-				if err != nil {
-					return err
-				}
-				if len(out.Failures) > 0 {
-					return fmt.Errorf("failed to delete %d image(s) from %s", len(out.Failures), repoName)
+			}
+			for repoName, ids := range byRepo {
+				for _, chunk := range utils.SliceChunkBy(ids, 100) {
+					if len(chunk) == 0 {
+						continue
+					}
+					a.Logger.LogInfo("Deleting ECR images", map[string]any{"Repository": repoName, "count": len(chunk)})
+					out, err := a.AWSClient.ECR.BatchDeleteImage(ctx, &ecr.BatchDeleteImageInput{
+						RepositoryName: aws.String(repoName),
+						ImageIds:       chunk,
+					})
+					if err != nil {
+						return err
+					}
+					if len(out.Failures) > 0 {
+						return fmt.Errorf("failed to delete %d image(s) from %s", len(out.Failures), repoName)
+					}
 				}
 			}
-		}
-	}
-
-	return nil
+			return nil
+		},
+	})
 }

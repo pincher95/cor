@@ -24,12 +24,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
-	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
-// snapshotsCmd represents the snapshots command
+type orphanSnapshot struct {
+	name string
+	id   string
+	size int32
+}
+
 var snapshotsCmd = &cobra.Command{
 	Use:   "snapshots",
 	Short: "Return Snapshots not associated with AMI, Volumes or created by Lifecycle policy",
@@ -46,126 +50,104 @@ var snapshotsCmd = &cobra.Command{
 	},
 }
 
-func (s *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	collectDeletes := globals.Delete
-	type snapshotDeleteCandidate struct {
-		id   string
-		name string
-	}
-	deleteCandidates := make([]snapshotDeleteCandidate, 0)
-
-	// Precompute usage sets (needed to accurately filter orphan snapshots).
-	usedByImages, err := s.collectSnapshotsUsedByImages(ctx)
-	if err != nil {
-		return err
-	}
-
-	usedByVolumes := make(map[string]bool, 1024)
-	volPaginator := ec2.NewDescribeVolumesPaginator(s.AWSClient.EC2, &ec2.DescribeVolumesInput{})
-	for volPaginator.HasMorePages() {
-		page, err := volPaginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, vol := range page.Volumes {
-			if vol.SnapshotId != nil {
-				usedByVolumes[*vol.SnapshotId] = true
-			}
-		}
-	}
-
-	// Stream output
-	stream := printer.NewStreamTable(s.Output, true, []string{"Name", "Snapshot ID", "Size"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	var totalSize int32
-	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
-	snapFilters := []types.Filter{}
-	if filterByName != "" {
-		snapFilters = append(snapFilters, types.Filter{Name: aws.String("tag:Name"), Values: []string{filterByName}})
-	}
-	snapPaginator := ec2.NewDescribeSnapshotsPaginator(s.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
-		OwnerIds: []string{"self"},
-		Filters:  snapFilters,
-	})
-
-	for snapPaginator.HasMorePages() {
-		page, err := snapPaginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, snap := range page.Snapshots {
-			if snap.SnapshotId == nil || snap.VolumeSize == nil {
-				continue
-			}
-			snapshotID := *snap.SnapshotId
-
-			desc := aws.ToString(snap.Description)
-			if strings.Contains(desc, "Created by CreateImage") || strings.Contains(desc, "Created for policy") {
-				continue
-			}
-			if usedByImages[snapshotID] || usedByVolumes[snapshotID] {
-				continue
-			}
-
-			name := "-"
-			if nameTag, ok := utils.TagsToMap(snap.Tags)["Name"]; ok && nameTag.Value != nil {
-				name = *nameTag.Value
-			}
-
-			stream.WriteRow(name, snapshotID, *snap.VolumeSize)
-			totalSize += *snap.VolumeSize
-
-			if collectDeletes {
-				deleteCandidates = append(deleteCandidates, snapshotDeleteCandidate{id: snapshotID, name: name})
-			}
-		}
-	}
-
-	// Total
-	stream.WriteRow("Total", "", totalSize)
-
-	if collectDeletes {
-		if len(deleteCandidates) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(s.Prompter, s.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, candidate := range deleteCandidates {
-			s.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": candidate.id, "Name": candidate.name})
-			if _, err := s.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(candidate.id)}); err != nil {
-				s.Logger.LogError("Error deleting snapshot", err, map[string]any{"SnapshotID": candidate.id}, false)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func init() {
-	// rootCmd.AddCommand(snapshotsCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// snapshotsCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// snapshotsCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	snapshotsCmd.Flags().String("filter-by-name", "", "Filter snapshots by tag:Name (empty = no filter).")
 }
 
-func (s *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[string]bool, error) {
+func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+
+	var usedByImages, usedByVolumes map[string]bool
+
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.Snapshot, orphanSnapshot]{
+		Headers:       []string{"Name", "Snapshot ID", "Size"},
+		ResourceLabel: "snapshots",
+		PreScan: func(ctx context.Context) error {
+			g, gctx := errgroup.WithContext(ctx)
+			g.Go(func() error {
+				m, err := a.collectSnapshotsUsedByImages(gctx)
+				if err != nil {
+					return err
+				}
+				usedByImages = m
+				return nil
+			})
+			g.Go(func() error {
+				m, err := a.collectSnapshotsUsedByVolumes(gctx)
+				if err != nil {
+					return err
+				}
+				usedByVolumes = m
+				return nil
+			})
+			return g.Wait()
+		},
+		List: func(ctx context.Context, emit func(types.Snapshot) error) error {
+			snapFilters := []types.Filter{}
+			if filterByName != "" {
+				snapFilters = append(snapFilters, types.Filter{
+					Name:   aws.String("tag:Name"),
+					Values: []string{filterByName},
+				})
+			}
+			p := ec2.NewDescribeSnapshotsPaginator(a.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
+				OwnerIds: []string{"self"},
+				Filters:  snapFilters,
+			})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, snap := range page.Snapshots {
+					if err := emit(snap); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, snap types.Snapshot) (*orphanSnapshot, error) {
+			id := aws.ToString(snap.SnapshotId)
+			if id == "" {
+				return nil, nil
+			}
+			desc := aws.ToString(snap.Description)
+			if strings.Contains(desc, "Created by CreateImage") || strings.Contains(desc, "Created for policy") {
+				return nil, nil
+			}
+			if usedByImages[id] || usedByVolumes[id] {
+				return nil, nil
+			}
+			name := ec2NameTag(snap.Tags)
+			if name == "" {
+				name = "-"
+			}
+			return &orphanSnapshot{name: name, id: id, size: aws.ToInt32(snap.VolumeSize)}, nil
+		},
+		ToRow: func(r orphanSnapshot) []any {
+			return []any{r.name, r.id, r.size}
+		},
+		Finalize: func(rs []orphanSnapshot) []any {
+			var total int32
+			for _, r := range rs {
+				total += r.size
+			}
+			return []any{"Total", "", total}
+		},
+		Delete: func(ctx context.Context, r orphanSnapshot) error {
+			a.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": r.id, "Name": r.name})
+			_, err := a.AWSClient.EC2.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(r.id)})
+			return err
+		},
+		DeleteConcurrency: 5,
+		DedupKey:          func(r orphanSnapshot) string { return r.id },
+	})
+}
+
+func (a *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[string]bool, error) {
 	used := make(map[string]bool)
-	paginator := ec2.NewDescribeImagesPaginator(s.AWSClient.EC2, &ec2.DescribeImagesInput{
+	paginator := ec2.NewDescribeImagesPaginator(a.AWSClient.EC2, &ec2.DescribeImagesInput{
 		Owners:            []string{"self"},
 		IncludeDeprecated: aws.Bool(true),
 		IncludeDisabled:   aws.Bool(true),
@@ -181,7 +163,7 @@ func (s *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[stri
 		pages++
 		images += len(page.Images)
 		if pages%25 == 0 {
-			s.Logger.LogInfo("Scanning AMIs for snapshot usage…", map[string]any{"pages": pages, "images": images})
+			a.Logger.LogInfo("Scanning AMIs for snapshot usage", map[string]any{"pages": pages, "images": images})
 		}
 		for _, image := range page.Images {
 			for _, mapping := range image.BlockDeviceMappings {
@@ -192,5 +174,22 @@ func (s *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[stri
 		}
 	}
 
+	return used, nil
+}
+
+func (a *AWSCommand) collectSnapshotsUsedByVolumes(ctx context.Context) (map[string]bool, error) {
+	used := make(map[string]bool, 1024)
+	p := ec2.NewDescribeVolumesPaginator(a.AWSClient.EC2, &ec2.DescribeVolumesInput{})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, vol := range page.Volumes {
+			if vol.SnapshotId != nil {
+				used[*vol.SnapshotId] = true
+			}
+		}
+	}
 	return used, nil
 }

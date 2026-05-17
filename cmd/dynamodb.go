@@ -101,7 +101,7 @@ func (a *AWSCommand) executeDynamoDB(ctx context.Context, globals *flags.GlobalF
 			if err != nil {
 				a.Logger.LogError("Error checking DynamoDB table", err, map[string]any{
 					"table": tableName,
-				}, false)
+				})
 				return nil, nil
 			}
 			return orphan, nil
@@ -122,7 +122,7 @@ func (a *AWSCommand) executeDynamoDB(ctx context.Context, globals *flags.GlobalF
 		Delete: func(ctx context.Context, r orphanDynamoDBTable) error {
 			a.Logger.LogInfo("Deleting DynamoDB table", map[string]any{"TableName": r.TableName})
 			if err := a.deleteDynamoDBTable(ctx, r.TableName); err != nil {
-				a.Logger.LogError("Failed to delete DynamoDB table", err, map[string]any{"TableName": r.TableName}, false)
+				a.Logger.LogError("Failed to delete DynamoDB table", err, map[string]any{"TableName": r.TableName})
 				return err
 			}
 			return nil

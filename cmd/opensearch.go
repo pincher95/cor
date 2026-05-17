@@ -108,14 +108,14 @@ func (a *AWSCommand) executeOpenSearch(ctx context.Context, globals *flags.Globa
 			if err != nil {
 				a.Logger.LogError("Error describing OpenSearch domain", err, map[string]any{
 					"domain": domainName,
-				}, false)
+				})
 				return nil, nil
 			}
 			orphan, err := a.checkOpenSearchOrphan(ctx, domainOutput.DomainStatus, daysNoIndexing, hoursNoSearches)
 			if err != nil {
 				a.Logger.LogError("Error checking OpenSearch domain", err, map[string]any{
 					"domain": domainName,
-				}, false)
+				})
 				return nil, nil
 			}
 			return orphan, nil
@@ -135,7 +135,7 @@ func (a *AWSCommand) executeOpenSearch(ctx context.Context, globals *flags.Globa
 		Delete: func(ctx context.Context, r orphanOpenSearchDomain) error {
 			a.Logger.LogInfo("Deleting OpenSearch domain", map[string]any{"DomainName": r.DomainName})
 			if err := a.deleteOpenSearchDomain(ctx, r.DomainName); err != nil {
-				a.Logger.LogError("Failed to delete OpenSearch domain", err, map[string]any{"DomainName": r.DomainName}, false)
+				a.Logger.LogError("Failed to delete OpenSearch domain", err, map[string]any{"DomainName": r.DomainName})
 				return err
 			}
 			return nil

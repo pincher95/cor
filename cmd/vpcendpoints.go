@@ -18,17 +18,24 @@ package cmd
 
 import (
 	"context"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/utils"
 	"github.com/spf13/cobra"
 )
+
+type orphanVPCEndpoint struct {
+	name     string
+	id       string
+	service  string
+	epType   string
+	state    string
+	eniCount int
+}
 
 var vpcEndpointsCmd = &cobra.Command{
 	Use:   "vpcendpoints",
@@ -54,78 +61,83 @@ func init() {
 	vpcEndpointsCmd.Flags().Bool("include-non-interface", false, "Include non-interface endpoints (gateway endpoints are typically free).")
 }
 
-func (v *AWSCommand) executeVPCEndpoints(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	rootCtx := ctx
-	collectDeletes := globals.Delete
+func (a *AWSCommand) executeVPCEndpoints(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByService := normalizeFilterValue((*extras)["filter-by-service"].(string))
 	includeAttached := (*extras)["include-attached"].(bool)
 	includeNonInterface := (*extras)["include-non-interface"].(bool)
 
-	stream := printer.NewStreamTable(v.Output, true, []string{"Name", "Endpoint ID", "Service", "Type", "State", "ENIs"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	deleteIDs := make([]string, 0)
-
-	filters := []ec2types.Filter{}
-	if !includeNonInterface {
-		filters = append(filters, ec2types.Filter{
-			Name:   aws.String("vpc-endpoint-type"),
-			Values: []string{string(ec2types.VpcEndpointTypeInterface)},
-		})
-	}
-
-	paginator := ec2.NewDescribeVpcEndpointsPaginator(v.AWSClient.EC2, &ec2.DescribeVpcEndpointsInput{
-		Filters: filters,
-	})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, ep := range page.VpcEndpoints {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[ec2types.VpcEndpoint, orphanVPCEndpoint]{
+		Headers:       []string{"Name", "Endpoint ID", "Service", "Type", "State", "ENIs"},
+		ResourceLabel: "VPC endpoints",
+		List: func(ctx context.Context, emit func(ec2types.VpcEndpoint) error) error {
+			filters := []ec2types.Filter{}
+			if !includeNonInterface {
+				filters = append(filters, ec2types.Filter{
+					Name:   aws.String("vpc-endpoint-type"),
+					Values: []string{string(ec2types.VpcEndpointTypeInterface)},
+				})
+			}
+			p := ec2.NewDescribeVpcEndpointsPaginator(a.AWSClient.EC2, &ec2.DescribeVpcEndpointsInput{
+				Filters: filters,
+			})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
+					return err
+				}
+				for _, ep := range page.VpcEndpoints {
+					if err := emit(ep); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(_ context.Context, ep ec2types.VpcEndpoint) (*orphanVPCEndpoint, error) {
 			service := aws.ToString(ep.ServiceName)
-			if filterByService != "" && !strings.Contains(service, filterByService) {
-				continue
+			if !matchesFilterValue(service, filterByService) {
+				return nil, nil
 			}
-			eniCount := 0
-			if ep.NetworkInterfaceIds != nil {
-				eniCount = len(ep.NetworkInterfaceIds)
-			}
+			eniCount := len(ep.NetworkInterfaceIds)
 			if !includeAttached && eniCount > 0 {
-				continue
+				return nil, nil
 			}
 			name := "-"
-			tagMap := utils.TagsToMap(ep.Tags)
-			if t, ok := tagMap["Name"]; ok && t.Value != nil {
-				name = *t.Value
+			if tag, ok := utils.TagsToMap(ep.Tags)["Name"]; ok && tag.Value != nil {
+				name = *tag.Value
 			}
-
-			stream.WriteRow(name, aws.ToString(ep.VpcEndpointId), service, string(ep.VpcEndpointType), string(ep.State), eniCount)
-			if collectDeletes && eniCount == 0 {
-				deleteIDs = append(deleteIDs, aws.ToString(ep.VpcEndpointId))
+			return &orphanVPCEndpoint{
+				name:     name,
+				id:       aws.ToString(ep.VpcEndpointId),
+				service:  service,
+				epType:   string(ep.VpcEndpointType),
+				state:    string(ep.State),
+				eniCount: eniCount,
+			}, nil
+		},
+		ToRow: func(r orphanVPCEndpoint) []any {
+			return []any{r.name, r.id, r.service, r.epType, r.state, r.eniCount}
+		},
+		DeleteBatch: func(ctx context.Context, rs []orphanVPCEndpoint) error {
+			ids := make([]string, 0, len(rs))
+			for _, r := range rs {
+				if r.eniCount > 0 {
+					continue
+				}
+				ids = append(ids, r.id)
 			}
-		}
-	}
-
-	if collectDeletes {
-		if len(deleteIDs) == 0 {
+			for _, chunk := range utils.SliceChunkBy(ids, 25) {
+				if len(chunk) == 0 {
+					continue
+				}
+				a.Logger.LogInfo("Deleting VPC endpoints", map[string]any{"count": len(chunk)})
+				if _, err := a.AWSClient.EC2.DeleteVpcEndpoints(ctx, &ec2.DeleteVpcEndpointsInput{
+					VpcEndpointIds: chunk,
+				}); err != nil {
+					return err
+				}
+			}
 			return nil
-		}
-		confirm, err := confirmDelete(v.Prompter, v.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		_, err = v.AWSClient.EC2.DeleteVpcEndpoints(rootCtx, &ec2.DeleteVpcEndpointsInput{
-			VpcEndpointIds: deleteIDs,
-		})
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+		},
+	})
 }

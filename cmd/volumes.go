@@ -48,10 +48,10 @@ var volumesCmd = &cobra.Command{
 	},
 }
 
-func (v *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+func (a *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
 
-	return runOrphanPipeline(v, ctx, globals, extras, OrphanPipeline[types.Volume, orphanVolume]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.Volume, orphanVolume]{
 		Headers:       []string{"Name", "Volume ID", "Snapshot ID", "Size"},
 		ResourceLabel: "EBS volumes",
 		List: func(ctx context.Context, emit func(types.Volume) error) error {
@@ -64,7 +64,7 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFl
 					Values: []string{filterByName},
 				})
 			}
-			p := ec2.NewDescribeVolumesPaginator(v.AWSClient.EC2, &ec2.DescribeVolumesInput{Filters: filters})
+			p := ec2.NewDescribeVolumesPaginator(a.AWSClient.EC2, &ec2.DescribeVolumesInput{Filters: filters})
 			for p.HasMorePages() {
 				page, err := p.NextPage(ctx)
 				if err != nil {
@@ -79,12 +79,9 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFl
 			return nil
 		},
 		Process: func(_ context.Context, vol types.Volume) (*orphanVolume, error) {
-			name := "-"
-			for _, t := range vol.Tags {
-				if aws.ToString(t.Key) == "Name" && t.Value != nil {
-					name = *t.Value
-					break
-				}
+			name := ec2NameTag(vol.Tags)
+			if name == "" {
+				name = "-"
 			}
 			return &orphanVolume{
 				name:       name,
@@ -104,10 +101,12 @@ func (v *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFl
 			return []any{"Total", "", "", total}
 		},
 		Delete: func(ctx context.Context, r orphanVolume) error {
-			v.Logger.LogInfo("Deleting Volume", map[string]any{"VolumeId": r.id})
-			_, err := v.AWSClient.EC2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.id)})
+			a.Logger.LogInfo("Deleting Volume", map[string]any{"VolumeId": r.id})
+			_, err := a.AWSClient.EC2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(r.id)})
 			return err
 		},
+		DeleteConcurrency: 5,
+		DedupKey:          func(r orphanVolume) string { return r.id },
 	})
 }
 

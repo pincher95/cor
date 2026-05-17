@@ -23,16 +23,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-// GlobalFlags holds the six root-level flags that every command shares.
-// Commands read them directly from this struct; the extras map returned
-// alongside holds only per-command flags.
+// GlobalFlags holds the root-level flags that every command shares. Commands
+// read them directly from this struct; the extras map returned alongside
+// holds only per-command flags.
 type GlobalFlags struct {
-	Region     string
-	Profile    string
-	AuthMethod string
-	Delete     bool
-	SortBy     string
-	SortDesc   bool
+	Region      string
+	Profile     string
+	AuthMethod  string
+	Delete      bool
+	SortBy      string
+	SortDesc    bool
+	AssumeYes   bool
+	OnError     string
+	LogFormat   string
+	MetricsFile string
+	DryRun      bool
+	Format      string
+	StateFile   string
 }
 
 // FlagRetriever defines an interface for retrieving flags.
@@ -132,6 +139,27 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*GlobalFlags
 		return nil, nil, err
 	}
 	if globals.SortDesc, err = getBool("sort-desc"); err != nil {
+		return nil, nil, err
+	}
+	if globals.AssumeYes, err = getBool("yes"); err != nil {
+		return nil, nil, err
+	}
+	if globals.OnError, err = getString("on-error"); err != nil {
+		return nil, nil, err
+	}
+	if globals.LogFormat, err = getString("log-format"); err != nil {
+		return nil, nil, err
+	}
+	if globals.MetricsFile, err = getString("metrics-file"); err != nil {
+		return nil, nil, err
+	}
+	if globals.DryRun, err = getBool("dry-run"); err != nil {
+		return nil, nil, err
+	}
+	if globals.Format, err = getString("format"); err != nil {
+		return nil, nil, err
+	}
+	if globals.StateFile, err = getString("state-file"); err != nil {
 		return nil, nil, err
 	}
 

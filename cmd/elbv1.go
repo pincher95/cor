@@ -18,21 +18,36 @@ package cmd
 import (
 	"context"
 	"strings"
-	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing/types"
-	"github.com/jedib0t/go-pretty/v6/table"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
 )
 
-// elbv1Cmd represents the elbv1 command
+type orphanLBv1 struct {
+	name              string
+	listenerCount     int
+	missingTargets    string
+	unhealthyTargets  string
+	vpcID             string
+	tags              string
+	isOrphan          bool
+	deleteCandidateID string
+}
+
+type elbv1Evaluation struct {
+	noTargets           bool
+	orphanTargets       []string
+	unhealthyTargets    []string
+	hasExistingTargets  bool
+	hasUnhealthyTargets bool
+}
+
 var elbv1Cmd = &cobra.Command{
 	Use:   "elbv1",
 	Short: "Return ELB of type Classic",
@@ -55,14 +70,14 @@ var elbv1Cmd = &cobra.Command{
 	},
 }
 
-func (e *AWSCommand) executeElbv1(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	collectDeletes := globals.Delete
+func init() {
+	elbv1Cmd.Flags().String("filter-by-name", "", "Filter load balancers by name (supports * and ?).")
+	elbv1Cmd.Flags().String("filter-by-tags", "", "Filter by tags (key=value or key; comma-separated).")
+	elbv1Cmd.Flags().Bool("show-unhealthy", false, "Include load balancers with unhealthy targets.")
+	elbv1Cmd.Flags().Bool("show-tags", false, "Include tags column in output.")
+}
 
-	var wg sync.WaitGroup
-	loadBalancerChan := make(chan types.LoadBalancerDescription, 100)
-	tableRowChan := make(chan elbv1Result, 100)
-	errorChan := make(chan error, 1)
-
+func (a *AWSCommand) executeElbv1(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	showUnhealthy := (*extras)["show-unhealthy"].(bool)
 	showTags := (*extras)["show-tags"].(bool)
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
@@ -76,193 +91,117 @@ func (e *AWSCommand) executeElbv1(ctx context.Context, globals *flags.GlobalFlag
 	if showTags {
 		headers = append(headers, "Tags")
 	}
-	stream := printer.NewStreamTable(e.Output, true, headers)
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
 
-	wg.Go(func() {
-		if err := describeLoadBalancers(ctx, e.AWSClient.ELBv1, loadBalancerChan); err != nil {
-			errorChan <- err
-			close(loadBalancerChan)
-			return
-		}
-		close(loadBalancerChan)
-	})
-
-	for lb := range loadBalancerChan {
-		wg.Go(func() {
-			if !matchesFilterValue(aws.ToString(lb.LoadBalancerName), filterByName) {
-				return
-			}
-			tableRow, deleteName, err := handleLoadBalancer(ctx, &lb, e.AWSClient.ELBv1, e.AWSClient.EC2, showUnhealthy, showTags, tagFilters)
-			if err != nil {
-				errorChan <- err
-				return
-			}
-			if tableRow != nil {
-				tableRowChan <- elbv1Result{row: tableRow, deleteName: deleteName}
-			}
-		})
-	}
-
-	doneChan := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	deleteNames := make([]string, 0)
-	for {
-		select {
-		case err := <-errorChan:
-			e.Logger.LogError("Error during loadbalancer processing", err, nil, true)
-			return err
-		case res := <-tableRowChan:
-			if res.row != nil && len(*res.row) > 0 {
-				stream.WriteRow((*res.row)...)
-			}
-			if collectDeletes && res.deleteName != "" {
-				deleteNames = append(deleteNames, res.deleteName)
-			}
-		case <-doneChan:
-			close(tableRowChan)
-			for res := range tableRowChan {
-				if res.row == nil || len(*res.row) == 0 {
-					continue
-				}
-				stream.WriteRow((*res.row)...)
-				if collectDeletes && res.deleteName != "" {
-					deleteNames = append(deleteNames, res.deleteName)
-				}
-			}
-			if !collectDeletes || len(deleteNames) == 0 {
-				return nil
-			}
-			confirm, err := confirmDelete(e.Prompter, e.Logger)
-			if err != nil {
-				return err
-			}
-			if !confirm {
-				return nil
-			}
-			for _, lbName := range deleteNames {
-				e.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": lbName})
-				if _, err := e.AWSClient.ELBv1.DeleteLoadBalancer(ctx, &elasticloadbalancing.DeleteLoadBalancerInput{
-					LoadBalancerName: aws.String(lbName),
-				}); err != nil {
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.LoadBalancerDescription, orphanLBv1]{
+		Headers:       headers,
+		ResourceLabel: "Classic ELBs",
+		List: func(ctx context.Context, emit func(types.LoadBalancerDescription) error) error {
+			p := elasticloadbalancing.NewDescribeLoadBalancersPaginator(a.AWSClient.ELBv1, &elasticloadbalancing.DescribeLoadBalancersInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
+				if err != nil {
 					return err
+				}
+				for _, lb := range page.LoadBalancerDescriptions {
+					if err := emit(lb); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
-		}
-	}
-}
+		},
+		Process: func(ctx context.Context, lb types.LoadBalancerDescription) (*orphanLBv1, error) {
+			lbName := aws.ToString(lb.LoadBalancerName)
+			if !matchesFilterValue(lbName, filterByName) {
+				return nil, nil
+			}
 
-func init() {
-	elbv1Cmd.Flags().String("filter-by-name", "", "Filter load balancers by name (supports * and ?).")
-	elbv1Cmd.Flags().String("filter-by-tags", "", "Filter by tags (key=value or key; comma-separated).")
-	elbv1Cmd.Flags().Bool("show-unhealthy", false, "Include load balancers with unhealthy targets.")
-	elbv1Cmd.Flags().Bool("show-tags", false, "Include tags column in output.")
-}
+			needTags := showTags || len(tagFilters) > 0
+			tagsValue := "-"
+			if needTags {
+				tagsMap, formatted, err := a.describeClassicElbTags(ctx, lbName)
+				if err != nil {
+					return nil, err
+				}
+				if len(tagFilters) > 0 && !tagsMatchFilters(tagsMap, tagFilters) {
+					return nil, nil
+				}
+				tagsValue = formatted
+			}
 
-type elbv1Evaluation struct {
-	noTargets           bool
-	orphanTargets       []string
-	unhealthyTargets    []string
-	hasExistingTargets  bool
-	hasUnhealthyTargets bool
-}
+			eval, err := a.evaluateElbv1(ctx, &lb)
+			if err != nil {
+				return nil, err
+			}
+			if eval == nil {
+				return nil, nil
+			}
+			isOrphan := eval.noTargets || (!eval.hasExistingTargets && len(eval.orphanTargets) > 0)
+			shouldOutput := isOrphan || (showUnhealthy && eval.hasUnhealthyTargets)
+			if !shouldOutput {
+				return nil, nil
+			}
 
-type elbv1Result struct {
-	row        *table.Row
-	deleteName string
-}
-
-func handleLoadBalancer(ctx context.Context, elb *types.LoadBalancerDescription, client *elasticloadbalancing.Client, ec2Client *ec2.Client, showUnhealthy bool, showTags bool, tagFilters []tagFilter) (*table.Row, string, error) {
-	needTags := showTags || len(tagFilters) > 0
-	tagsValue := "-"
-	if needTags {
-		tagsMap, formattedTags, err := describeClassicElbTags(ctx, client, aws.ToString(elb.LoadBalancerName))
-		if err != nil {
-			return nil, "", err
-		}
-		if len(tagFilters) > 0 && !tagsMatchFilters(tagsMap, tagFilters) {
-			return nil, "", nil
-		}
-		tagsValue = formattedTags
-	}
-
-	eval, err := evaluateElbv1(ctx, elb, client, ec2Client)
-	if err != nil {
-		return nil, "", err
-	}
-	if eval == nil {
-		return nil, "", nil
-	}
-
-	isOrphan := eval.noTargets || (!eval.hasExistingTargets && len(eval.orphanTargets) > 0)
-	shouldOutput := isOrphan || (showUnhealthy && eval.hasUnhealthyTargets)
-	if !shouldOutput {
-		return nil, "", nil
-	}
-
-	missingTargets := "-"
-	if len(eval.orphanTargets) > 0 {
-		missingTargets = strings.Join(eval.orphanTargets, "\n")
-	}
-	unhealthyTargets := "-"
-	if len(eval.unhealthyTargets) > 0 {
-		unhealthyTargets = strings.Join(eval.unhealthyTargets, "\n")
-	}
-
-	listenersCount := len(elb.ListenerDescriptions)
-	vpcID := aws.ToString(elb.VPCId)
-	if vpcID == "" {
-		vpcID = "-"
-	}
-
-	row := table.Row{aws.ToString(elb.LoadBalancerName), listenersCount, missingTargets}
-	if showUnhealthy {
-		row = append(row, unhealthyTargets)
-	}
-	row = append(row, vpcID)
-	if showTags {
-		row = append(row, tagsValue)
-	}
-
-	deleteName := ""
-	if isOrphan {
-		name := aws.ToString(elb.LoadBalancerName)
-		if name != "" {
-			deleteName = name
-		}
-	}
-	return &row, deleteName, nil
-}
-
-func describeLoadBalancers(ctx context.Context, client *elasticloadbalancing.Client, loadBalancerChan chan<- types.LoadBalancerDescription) error {
-	paginator := elasticloadbalancing.NewDescribeLoadBalancersPaginator(client, &elasticloadbalancing.DescribeLoadBalancersInput{})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
+			missingTargets := "-"
+			if len(eval.orphanTargets) > 0 {
+				missingTargets = strings.Join(eval.orphanTargets, "\n")
+			}
+			unhealthyTargets := "-"
+			if len(eval.unhealthyTargets) > 0 {
+				unhealthyTargets = strings.Join(eval.unhealthyTargets, "\n")
+			}
+			vpcID := aws.ToString(lb.VPCId)
+			if vpcID == "" {
+				vpcID = "-"
+			}
+			deleteID := ""
+			if isOrphan {
+				deleteID = lbName
+			}
+			return &orphanLBv1{
+				name:              lbName,
+				listenerCount:     len(lb.ListenerDescriptions),
+				missingTargets:    missingTargets,
+				unhealthyTargets:  unhealthyTargets,
+				vpcID:             vpcID,
+				tags:              tagsValue,
+				isOrphan:          isOrphan,
+				deleteCandidateID: deleteID,
+			}, nil
+		},
+		ToRow: func(r orphanLBv1) []any {
+			row := []any{r.name, r.listenerCount, r.missingTargets}
+			if showUnhealthy {
+				row = append(row, r.unhealthyTargets)
+			}
+			row = append(row, r.vpcID)
+			if showTags {
+				row = append(row, r.tags)
+			}
+			return row
+		},
+		Delete: func(ctx context.Context, r orphanLBv1) error {
+			if r.deleteCandidateID == "" {
+				return nil
+			}
+			a.Logger.LogInfo("Deleting LoadBalancer", map[string]any{"LoadBalancerName": r.deleteCandidateID})
+			_, err := a.AWSClient.ELBv1.DeleteLoadBalancer(ctx, &elasticloadbalancing.DeleteLoadBalancerInput{
+				LoadBalancerName: aws.String(r.deleteCandidateID),
+			})
 			return err
-		}
-		for _, lb := range page.LoadBalancerDescriptions {
-			loadBalancerChan <- lb
-		}
-	}
-	return nil
+		},
+	})
 }
 
-func evaluateElbv1(ctx context.Context, elb *types.LoadBalancerDescription, client *elasticloadbalancing.Client, ec2Client *ec2.Client) (*elbv1Evaluation, error) {
+func (a *AWSCommand) evaluateElbv1(ctx context.Context, lb *types.LoadBalancerDescription) (*elbv1Evaluation, error) {
 	eval := &elbv1Evaluation{}
-	if len(elb.Instances) == 0 {
+	if len(lb.Instances) == 0 {
 		eval.noTargets = true
 		return eval, nil
 	}
 
-	instanceHealth, err := client.DescribeInstanceHealth(ctx, &elasticloadbalancing.DescribeInstanceHealthInput{
-		LoadBalancerName: elb.LoadBalancerName,
+	instanceHealth, err := a.AWSClient.ELBv1.DescribeInstanceHealth(ctx, &elasticloadbalancing.DescribeInstanceHealthInput{
+		LoadBalancerName: lb.LoadBalancerName,
 	})
 	if err != nil {
 		return nil, err
@@ -279,13 +218,11 @@ func evaluateElbv1(ctx context.Context, elb *types.LoadBalancerDescription, clie
 			eval.hasExistingTargets = true
 			continue
 		}
-
 		if instanceID != "" {
 			eval.hasUnhealthyTargets = true
 			eval.unhealthyTargets = append(eval.unhealthyTargets, instanceID)
 		}
-
-		exists, err := checkClassicInstanceExists(ctx, ec2Client, instanceID)
+		exists, err := a.checkClassicInstanceExists(ctx, instanceID)
 		if err != nil {
 			continue
 		}
@@ -297,15 +234,14 @@ func evaluateElbv1(ctx context.Context, elb *types.LoadBalancerDescription, clie
 			eval.orphanTargets = append(eval.orphanTargets, instanceID)
 		}
 	}
-
 	return eval, nil
 }
 
-func checkClassicInstanceExists(ctx context.Context, ec2Client *ec2.Client, instanceID string) (bool, error) {
+func (a *AWSCommand) checkClassicInstanceExists(ctx context.Context, instanceID string) (bool, error) {
 	if instanceID == "" {
 		return false, nil
 	}
-	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+	result, err := a.AWSClient.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		Filters: []ec2types.Filter{
 			{
 				Name:   aws.String("instance-id"),
@@ -324,11 +260,11 @@ func checkClassicInstanceExists(ctx context.Context, ec2Client *ec2.Client, inst
 	return false, nil
 }
 
-func describeClassicElbTags(ctx context.Context, client *elasticloadbalancing.Client, loadBalancerName string) (map[string]string, string, error) {
+func (a *AWSCommand) describeClassicElbTags(ctx context.Context, loadBalancerName string) (map[string]string, string, error) {
 	if loadBalancerName == "" {
 		return map[string]string{}, "-", nil
 	}
-	resp, err := client.DescribeTags(ctx, &elasticloadbalancing.DescribeTagsInput{
+	resp, err := a.AWSClient.ELBv1.DescribeTags(ctx, &elasticloadbalancing.DescribeTagsInput{
 		LoadBalancerNames: []string{loadBalancerName},
 	})
 	if err != nil {

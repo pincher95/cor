@@ -30,6 +30,7 @@ investigations/
 
 # Compiled binary
 cor
+dist/
 remotestore_stats_all.json
 
 # Git worktrees

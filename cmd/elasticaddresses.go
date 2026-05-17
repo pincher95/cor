@@ -113,6 +113,7 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, globals *flags.Globa
 			_, err := a.AWSClient.EC2.ReleaseAddress(ctx, &input)
 			return err
 		},
+		DeleteConcurrency: 5,
 	})
 }
 

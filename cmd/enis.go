@@ -110,7 +110,7 @@ func init() {
 	_ = enisCmd.Flags().MarkHidden("filter-by-private-ip")
 }
 
-func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
+func (a *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	cache := newAWSNameCache()
 
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
@@ -125,7 +125,7 @@ func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags
 		filterByDesc = normalizeFilterValue(getFlagString(extras, "filter-by-description"))
 	}
 
-	return runOrphanPipeline(e, ctx, globals, extras, OrphanPipeline[types.NetworkInterface, orphanENI]{
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.NetworkInterface, orphanENI]{
 		Headers:       []string{"Name", "ENI ID", "Type", "Status", "RequesterManaged", "Description", "VPC", "Subnet", "Private IP", "Security Groups"},
 		ResourceLabel: "ENIs",
 		List: func(ctx context.Context, emit func(types.NetworkInterface) error) error {
@@ -167,7 +167,7 @@ func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags
 
 			seen := make(map[string]struct{}, 128)
 			runPage := func(filters []types.Filter) error {
-				paginator := ec2.NewDescribeNetworkInterfacesPaginator(e.AWSClient.EC2, &ec2.DescribeNetworkInterfacesInput{
+				paginator := ec2.NewDescribeNetworkInterfacesPaginator(a.AWSClient.EC2, &ec2.DescribeNetworkInterfacesInput{
 					Filters: filters,
 				})
 				for paginator.HasMorePages() {
@@ -217,12 +217,9 @@ func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags
 				return nil, nil
 			}
 
-			name := "-"
-			for _, t := range ni.TagSet {
-				if aws.ToString(t.Key) == "Name" && t.Value != nil {
-					name = *t.Value
-					break
-				}
+			name := ec2NameTag(ni.TagSet)
+			if name == "" {
+				name = "-"
 			}
 
 			ifType := string(ni.InterfaceType)
@@ -258,9 +255,9 @@ func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags
 				}
 			}
 
-			vpcName := e.getVPCName(ctx, cache, vpcID)
-			subnetName := e.getSubnetName(ctx, cache, subnetID)
-			e.ensureSGNames(ctx, cache, sgIDList)
+			vpcName := a.getVPCName(ctx, cache, vpcID)
+			subnetName := a.getSubnetName(ctx, cache, subnetID)
+			a.ensureSGNames(ctx, cache, sgIDList)
 
 			return &orphanENI{
 				name:             name,
@@ -285,23 +282,15 @@ func (e *AWSCommand) executeENIs(ctx context.Context, globals *flags.GlobalFlags
 			if r.id == "" || r.id == "-" {
 				return nil
 			}
-			e.Logger.LogInfo("Deleting ENI", map[string]any{"NetworkInterfaceId": r.id})
-			_, err := e.AWSClient.EC2.DeleteNetworkInterface(ctx, &ec2.DeleteNetworkInterfaceInput{
+			a.Logger.LogInfo("Deleting ENI", map[string]any{"NetworkInterfaceId": r.id})
+			_, err := a.AWSClient.EC2.DeleteNetworkInterface(ctx, &ec2.DeleteNetworkInterfaceInput{
 				NetworkInterfaceId: aws.String(r.id),
 			})
 			return err
 		},
+		DeleteConcurrency: 5,
+		DedupKey:          func(r orphanENI) string { return r.id },
 	})
-}
-
-// findNameTag returns the value of the "Name" tag, or "" if absent/empty.
-func findNameTag(tags []types.Tag) string {
-	for _, t := range tags {
-		if aws.ToString(t.Key) == "Name" && t.Value != nil && aws.ToString(t.Value) != "" {
-			return aws.ToString(t.Value)
-		}
-	}
-	return ""
 }
 
 // formatIDAndName renders "id (name)" when a name is present, "id" otherwise,
@@ -317,7 +306,7 @@ func formatIDAndName(id string, name string) string {
 }
 
 // getVPCName returns the tag:Name of the given VPC, caching the result.
-func (e *AWSCommand) getVPCName(ctx context.Context, cache *awsNameCache, vpcID string) string {
+func (a *AWSCommand) getVPCName(ctx context.Context, cache *awsNameCache, vpcID string) string {
 	if vpcID == "" || vpcID == "-" {
 		return "-"
 	}
@@ -329,9 +318,9 @@ func (e *AWSCommand) getVPCName(ctx context.Context, cache *awsNameCache, vpcID 
 	cache.mu.RUnlock()
 
 	out := "-"
-	resp, err := e.AWSClient.EC2.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{VpcIds: []string{vpcID}})
+	resp, err := a.AWSClient.EC2.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{VpcIds: []string{vpcID}})
 	if err == nil && len(resp.Vpcs) > 0 {
-		if n := findNameTag(resp.Vpcs[0].Tags); n != "" {
+		if n := ec2NameTag(resp.Vpcs[0].Tags); n != "" {
 			out = n
 		}
 	}
@@ -343,7 +332,7 @@ func (e *AWSCommand) getVPCName(ctx context.Context, cache *awsNameCache, vpcID 
 }
 
 // getSubnetName returns the tag:Name of the given subnet, caching the result.
-func (e *AWSCommand) getSubnetName(ctx context.Context, cache *awsNameCache, subnetID string) string {
+func (a *AWSCommand) getSubnetName(ctx context.Context, cache *awsNameCache, subnetID string) string {
 	if subnetID == "" || subnetID == "-" {
 		return "-"
 	}
@@ -355,9 +344,9 @@ func (e *AWSCommand) getSubnetName(ctx context.Context, cache *awsNameCache, sub
 	cache.mu.RUnlock()
 
 	out := "-"
-	resp, err := e.AWSClient.EC2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{subnetID}})
+	resp, err := a.AWSClient.EC2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{subnetID}})
 	if err == nil && len(resp.Subnets) > 0 {
-		if n := findNameTag(resp.Subnets[0].Tags); n != "" {
+		if n := ec2NameTag(resp.Subnets[0].Tags); n != "" {
 			out = n
 		}
 	}
@@ -371,7 +360,7 @@ func (e *AWSCommand) getSubnetName(ctx context.Context, cache *awsNameCache, sub
 // ensureSGNames populates the security-group name cache for any of the given
 // IDs that are not yet cached. On partial failure the missing IDs are cached
 // as "-" so subsequent lookups do not re-issue the same failing request.
-func (e *AWSCommand) ensureSGNames(ctx context.Context, cache *awsNameCache, sgIDs []string) {
+func (a *AWSCommand) ensureSGNames(ctx context.Context, cache *awsNameCache, sgIDs []string) {
 	missing := make([]string, 0)
 	cache.mu.RLock()
 	for _, id := range sgIDs {
@@ -386,7 +375,7 @@ func (e *AWSCommand) ensureSGNames(ctx context.Context, cache *awsNameCache, sgI
 	if len(missing) == 0 {
 		return
 	}
-	resp, err := e.AWSClient.EC2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: missing})
+	resp, err := a.AWSClient.EC2.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupIds: missing})
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	// Default missing to "-" to avoid repeated calls if Describe fails/partial.

@@ -39,9 +39,13 @@ Conventional-commits enforced via `@commitlint/config-conventional` (see `.openc
 
 - **`cmd/<resource>.go`** — one file per AWS resource type. Each defines a `cobra.Command` var (e.g. `volumesCmd`), its `RunE`, its `init()` registering resource-specific flags, and an `execute<Resource>` method on `AWSCommand` with the actual logic. New commands are wired into `addSubcommandsPallets()` in `cmd/root.go`.
 - **`cmd/root.go`** — defines `AWSCommand` (AWSClient + Logger + Prompter + Output), persistent root flags (`--region`, `--profile`, `--auth-method`, `--delete`, `--sort-by`, `--sort-desc`, `--timeout`, `--config`), Viper init, and timeout context plumbing via `PersistentPreRunE`/`PersistentPostRun`.
+- **`cmd/runner.go`** — `CommandSetup` + `runResourceCommand` own the boilerplate phase of every resource command: flag retrieval via `flags.GetFlags`, AWS config resolution, client assembly through `setup.BuildClients`, and `AWSCommand` packaging. Resource commands' `RunE` should be a thin call into `runResourceCommand(cmd, CommandSetup{AdditionalFlags: …, BuildClients: …}, executeFn)`. `newConfigFn` is the test seam to override `handlers.NewConfig` without hitting real AWS.
+- **`cmd/pipeline.go`** — `OrphanPipeline[Item, Result]` + `runOrphanPipeline` own the producer→workers→collector loop (see below). Per-command variation lives in the `Headers`, `List`, `Process`, `ToRow`, optional `Finalize`, and optional `Delete` fields. **Don't hand-roll the errgroup pattern in new commands — use this.**
 - **`cmd/helpers.go`** — shared: `confirmDelete`, tag-filter parsing (`parseTagFilters` / `tagsMatchFilters`), glob name matching (`matchesFilterValue` accepts `*`/`?`), ELB-tag map/format helpers.
 - **`pkg/handlers/aws/client.go`** — `AWSClientImpl` struct bundles all service clients (EC2, ELB, STS, RDS, Lambda, CW, CWL, ...); only populate the ones a command needs. `NewConfig` picks auth (`AWS_CREDENTIALS_FILE` vs `ENV_SECRET`) and installs a **custom retryer that fail-fasts on auth/signing errors** (`RequestExpired`, `ExpiredToken`, `SignatureDoesNotMatch`, ...) while keeping 20 attempts for throttling.
-- **`pkg/handlers/flags`** — `CommandFlagRetriever` + `GetFlags` implement precedence **CLI > YAML config > `COR_*` env > defaults**. Flag lookup walks `Flags() → InheritedFlags() → PersistentFlags()` so persistent root flags resolve from any subcommand. Don't bypass this — always go through `flags.GetFlags` with an `additionalFlags []flags.Flag` list.
+- **`pkg/handlers/flags`** — `CommandFlagRetriever` + `GetFlags` implement precedence **CLI > YAML config > `COR_*` env > defaults**, returning `(*GlobalFlags, map[string]any)` — `GlobalFlags` holds the six root flags every command shares; the map holds only per-command extras. Flag lookup walks `Flags() → InheritedFlags() → PersistentFlags()` so persistent root flags resolve from any subcommand. Don't bypass this — always go through `flags.GetFlags` with an `additionalFlags []flags.Flag` list.
+- **`pkg/handlers/logging`** — `logging.NewLogger()` returns the structured logger used everywhere; `LogInfo` / `LogError(msg, err, fields, fatal)` are the only call sites you should need.
+- **`pkg/handlers/prompter`** — interactive yes/no prompt used by `confirmDelete`. Has a stub implementation for tests.
 - **`pkg/handlers/printer`** — `StreamTable` writes rows in chunks of 200 as they arrive (bounded memory). `SetSort(col, desc)` forces full buffering (streaming off), so warn users that `--sort-by` is incompatible with very large result sets.
 - **`pkg/utils/cache.go`** — `InstanceCache` de-duplicates EC2 instance existence lookups within a single command (used when many ELB targets reference the same instance).
 
@@ -49,21 +53,21 @@ Conventional-commits enforced via `@commitlint/config-conventional` (see `.openc
 
 Every `cmd/*.go` follows this exact skeleton — match it when adding a resource:
 
-1. `RunE` builds: `prompter`, `ctx := cmd.Context()`, `flags.GetFlags(flagRetriever, additionalFlags)`, `handlers.NewConfig(...)`, per-service clients attached to a minimal `&handlers.AWSClientImpl{...}`, then calls a `run<Resource>Cmd` helper.
-2. `run<Resource>Cmd` wraps client/logger/prompter/output into an `AWSCommand` and delegates to `(*AWSCommand).execute<Resource>(ctx, globals, extras)` where `globals` is `*flags.GlobalFlags` and `extras` is the per-command flag map from `flags.GetFlags`.
-3. `execute<Resource>` runs the producer→workers→collector pattern (below), then the delete phase.
+1. `RunE` is a one-liner that calls `runResourceCommand(cmd, CommandSetup{AdditionalFlags, BuildClients}, executeFn)`. `BuildClients` returns a minimal `*handlers.AWSClientImpl` populated only with the services this command uses.
+2. `runResourceCommand` (in `cmd/runner.go`) handles flag resolution, AWS config, client wiring, and packages everything into an `AWSCommand`. It then invokes `executeFn(awsCmd, ctx, globals, extras)`.
+3. `execute<Resource>` returns `runOrphanPipeline(...)` with an `OrphanPipeline[Item, Result]{Headers, ResourceLabel, List, Process, ToRow, Finalize?, Delete?}` describing the per-command variation. Delete logic goes in the `Delete` callback — the pipeline runs it after the table has streamed and `confirmDelete` is satisfied.
 
-See `cmd/volumes.go` and `cmd/autoscaling.go` as canonical references.
+See `cmd/volumes.go` and `cmd/lambda.go` as canonical references for the new shape.
 
 ### Producer → workers → collector (errgroup)
 
-Long list+filter commands use `errgroup.WithContext(ctx)` with three stages:
+`runOrphanPipeline` in `cmd/pipeline.go` owns this pattern; commands only supply the callbacks. Background for debugging / extending it:
 
-- **Producer** (one `g.Go`): paginate the AWS list API with `New<Op>Paginator`, push items onto a buffered channel (cap 10–50), close the channel on return.
-- **Workers** (`NumGoroutines = 10`, defined in `cmd/root.go`): N × `g.Go` each read from the item channel, enrich per-item (extra `Describe*` calls, CloudWatch metrics), and push `table.Row` onto a results channel. Workers must `select` on `egCtx.Done()` for cancellation.
-- **Collector** (plain `go func()`, not in the errgroup): reads from the results channel, calls `stream.WriteRow(...)`, accumulates delete candidate IDs.
+- **Producer** (one `g.Go`): the pipeline calls `spec.List(ctx, items)` which paginates the AWS list API (always `New<Op>Paginator`, never hand-rolled `NextToken`) and pushes onto a buffered channel.
+- **Workers** (`NumGoroutines = 10`, defined in `cmd/root.go`): N × `g.Go` invoke `spec.Process(ctx, item)` to enrich per-item (extra `Describe*` calls, CloudWatch metrics) and push results onto an output channel. Workers `select` on `egCtx.Done()` for cancellation.
+- **Collector** (plain `go func()`, not in the errgroup): consumes results, calls `spec.ToRow(result)`, writes via `StreamTable`, accumulates delete candidates for the `Delete` phase.
 
-After `g.Wait()`: close the results channel, wait for the collector to drain, then run the delete phase.
+After `g.Wait()`: close the results channel, drain the collector, then run `spec.Delete` (gated by `--delete` and `confirmDelete`).
 
 ### The `rootCtx` pattern for deletes (critical)
 

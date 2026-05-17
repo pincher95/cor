@@ -17,16 +17,13 @@ package cmd
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
-	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 var rdsCmd = &cobra.Command{
@@ -58,30 +55,20 @@ type rdsResource struct {
 	Created string
 }
 
-func (c *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
-	// If neither flag is set, default to both true (preserves pre-runner behavior).
+func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	if !(*extras)["include-instances"].(bool) && !(*extras)["include-snapshots"].(bool) {
 		(*extras)["include-instances"] = true
 		(*extras)["include-snapshots"] = true
 	}
-	rootCtx := ctx
+	includeInstances := (*extras)["include-instances"].(bool)
+	includeSnapshots := (*extras)["include-snapshots"].(bool)
 
-	collectDeletes := globals.Delete
-	deleteCandidates := make([]rdsResource, 0)
-
-	resChan := make(chan rdsResource, 50)
-	g, egCtx := errgroup.WithContext(ctx)
-	var producerWG sync.WaitGroup
-
-	// Producer: Instances
-	if (*extras)["include-instances"].(bool) {
-		producerWG.Add(1)
-		g.Go(func() error {
-			defer producerWG.Done()
-			// Note: DescribeDBInstances does not support server-side Filters.
-			paginator := rds.NewDescribeDBInstancesPaginator(c.AWSClient.RDS, &rds.DescribeDBInstancesInput{})
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(egCtx)
+	producers := []func(context.Context, func(rdsResource) error) error{}
+	if includeInstances {
+		producers = append(producers, func(ctx context.Context, emit func(rdsResource) error) error {
+			p := rds.NewDescribeDBInstancesPaginator(a.AWSClient.RDS, &rds.DescribeDBInstancesInput{})
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
 				if err != nil {
 					return err
 				}
@@ -93,32 +80,26 @@ func (c *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 					if inst.InstanceCreateTime != nil {
 						created = inst.InstanceCreateTime.UTC().Format(time.RFC3339)
 					}
-					select {
-					case <-egCtx.Done():
-						return egCtx.Err()
-					case resChan <- rdsResource{
+					if err := emit(rdsResource{
 						Type:    "Instance",
 						ID:      aws.ToString(inst.DBInstanceIdentifier),
 						Status:  aws.ToString(inst.DBInstanceStatus),
 						Created: created,
-					}:
+					}); err != nil {
+						return err
 					}
 				}
 			}
 			return nil
 		})
 	}
-
-	// Producer: Snapshots
-	if (*extras)["include-snapshots"].(bool) {
-		producerWG.Add(1)
-		g.Go(func() error {
-			defer producerWG.Done()
-			paginator := rds.NewDescribeDBSnapshotsPaginator(c.AWSClient.RDS, &rds.DescribeDBSnapshotsInput{
+	if includeSnapshots {
+		producers = append(producers, func(ctx context.Context, emit func(rdsResource) error) error {
+			p := rds.NewDescribeDBSnapshotsPaginator(a.AWSClient.RDS, &rds.DescribeDBSnapshotsInput{
 				SnapshotType: aws.String("manual"),
 			})
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(egCtx)
+			for p.HasMorePages() {
+				page, err := p.NextPage(ctx)
 				if err != nil {
 					return err
 				}
@@ -127,15 +108,13 @@ func (c *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 					if snap.SnapshotCreateTime != nil {
 						created = snap.SnapshotCreateTime.UTC().Format(time.RFC3339)
 					}
-					select {
-					case <-egCtx.Done():
-						return egCtx.Err()
-					case resChan <- rdsResource{
+					if err := emit(rdsResource{
 						Type:    "Snapshot",
 						ID:      aws.ToString(snap.DBSnapshotIdentifier),
 						Status:  aws.ToString(snap.Status),
 						Created: created,
-					}:
+					}); err != nil {
+						return err
 					}
 				}
 			}
@@ -143,65 +122,33 @@ func (c *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 		})
 	}
 
-	// Close channel when producers are done
-	go func() {
-		producerWG.Wait()
-		close(resChan)
-	}()
-
-	// Stream output + delete as we go
-	stream := printer.NewStreamTable(c.Output, true, []string{"Type", "ID", "Status", "Created"})
-	stream.SetSort(globals.SortBy, globals.SortDesc)
-	defer stream.Close()
-
-	for res := range resChan {
-		stream.WriteRow(res.Type, res.ID, res.Status, res.Created)
-
-		if collectDeletes {
-			deleteCandidates = append(deleteCandidates, res)
-		}
-	}
-
-	if err := g.Wait(); err != nil {
-		c.Logger.LogError("Error processing RDS resources", err, nil, false)
-		return err
-	}
-
-	if collectDeletes {
-		if len(deleteCandidates) == 0 {
-			return nil
-		}
-		confirm, err := confirmDelete(c.Prompter, c.Logger)
-		if err != nil {
-			return err
-		}
-		if !confirm {
-			return nil
-		}
-		for _, res := range deleteCandidates {
-			if res.Type == "Instance" {
-				c.Logger.LogInfo("Deleting RDS Instance (SkipFinalSnapshot=true)", map[string]any{"ID": res.ID})
-				_, err := c.AWSClient.DeleteDBInstance(rootCtx, &rds.DeleteDBInstanceInput{
-					DBInstanceIdentifier: aws.String(res.ID),
+	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[rdsResource, rdsResource]{
+		Headers:       []string{"Type", "ID", "Status", "Created"},
+		ResourceLabel: "RDS resources",
+		Lists:         producers,
+		Process: func(_ context.Context, r rdsResource) (*rdsResource, error) {
+			return &r, nil
+		},
+		ToRow: func(r rdsResource) []any {
+			return []any{r.Type, r.ID, r.Status, r.Created}
+		},
+		Delete: func(ctx context.Context, r rdsResource) error {
+			switch r.Type {
+			case "Instance":
+				a.Logger.LogInfo("Deleting RDS Instance (SkipFinalSnapshot=true)", map[string]any{"ID": r.ID})
+				_, err := a.AWSClient.RDS.DeleteDBInstance(ctx, &rds.DeleteDBInstanceInput{
+					DBInstanceIdentifier: aws.String(r.ID),
 					SkipFinalSnapshot:    aws.Bool(true),
 				})
-				if err != nil {
-					return err
-				}
-				continue
-			}
-
-			c.Logger.LogInfo("Deleting DB Snapshot", map[string]any{"ID": res.ID})
-			_, err := c.AWSClient.DeleteDBSnapshot(rootCtx, &rds.DeleteDBSnapshotInput{
-				DBSnapshotIdentifier: aws.String(res.ID),
-			})
-			if err != nil {
+				return err
+			case "Snapshot":
+				a.Logger.LogInfo("Deleting DB Snapshot", map[string]any{"ID": r.ID})
+				_, err := a.AWSClient.RDS.DeleteDBSnapshot(ctx, &rds.DeleteDBSnapshotInput{
+					DBSnapshotIdentifier: aws.String(r.ID),
+				})
 				return err
 			}
-		}
-	}
-
-	return nil
+			return nil
+		},
+	})
 }
-
-// Legacy pretty-table printer removed in favor of streaming output for low memory usage.
