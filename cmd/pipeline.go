@@ -201,6 +201,10 @@ func runOrphanPipeline[Item, Result any](
 		headers, toRow = decorateForRegion(headers, toRow, *a.CloudConfig.Region)
 	}
 	costFiltered := spec.MonthlyCost != nil && (globals.MinCost > 0 || globals.TopN > 0 || globals.Rank)
+	// In --all-regions mode the runner owns one cross-region sink. Per-region
+	// pipelines write into it; sort/footer are suppressed so the unified
+	// table isn't fragmented by per-region totals.
+	usingSharedSink := a.SharedSink != nil
 	collectorDone := make(chan struct{})
 	go func() {
 		defer close(collectorDone)
@@ -210,12 +214,20 @@ func runOrphanPipeline[Item, Result any](
 			}
 			return
 		}
-		stream := printer.NewSink(globals.Format, a.Output, !spec.HideIndex, headers)
-		stream.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
-		defer stream.Close()
+		var stream printer.RowSink
+		if usingSharedSink {
+			stream = a.SharedSink.Get(!spec.HideIndex, headers)
+		} else {
+			stream = printer.NewSink(globals.Format, a.Output, !spec.HideIndex, headers)
+			stream.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
+			defer stream.Close()
+		}
 		for r := range resultChan {
 			stream.WriteRow(toRow(r)...)
 			collected = append(collected, r)
+		}
+		if usingSharedSink {
+			return
 		}
 		if spec.Finalize != nil {
 			if row := spec.Finalize(collected); row != nil {
@@ -430,6 +442,8 @@ func applyCostFilters[Result any](collected []Result, price func(Result) cost.US
 
 // renderCostFiltered writes the post-filtered rows (with optional Rank column)
 // plus the Finalize/cost footer to a fresh sink. Used after applyCostFilters.
+// When --all-regions is set, the runner-owned SharedSink is used instead and
+// the per-region footer is suppressed.
 func renderCostFiltered[Item, Result any](
 	a *AWSCommand,
 	globals *flags.GlobalFlags,
@@ -448,11 +462,20 @@ func renderCostFiltered[Item, Result any](
 			return append([]any{rank}, toRow(r)...)
 		}
 	}
-	stream := printer.NewSink(globals.Format, a.Output, !spec.HideIndex, outHeaders)
-	stream.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
-	defer stream.Close()
+	var stream printer.RowSink
+	usingSharedSink := a.SharedSink != nil
+	if usingSharedSink {
+		stream = a.SharedSink.Get(!spec.HideIndex, outHeaders)
+	} else {
+		stream = printer.NewSink(globals.Format, a.Output, !spec.HideIndex, outHeaders)
+		stream.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
+		defer stream.Close()
+	}
 	for _, r := range collected {
 		stream.WriteRow(outToRow(r)...)
+	}
+	if usingSharedSink {
+		return
 	}
 	if spec.Finalize != nil {
 		if row := spec.Finalize(collected); row != nil {

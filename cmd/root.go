@@ -21,11 +21,13 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
+	"github.com/pincher95/cor/pkg/handlers/printer"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -42,6 +44,42 @@ type AWSCommand struct {
 	Prompter    prompter.Client
 	Output      io.Writer
 	Pricing     *cost.Pricing
+	// SharedSink, when non-nil, causes the pipeline to write rows into a
+	// single cross-region table instead of building its own per-region sink.
+	// Set by runAcrossRegions; nil for single-region runs.
+	SharedSink *SharedSink
+}
+
+// SharedSink is a lazy-once container for a thread-safe RowSink used by
+// --all-regions to unify per-region output into a single table.
+type SharedSink struct {
+	once   sync.Once
+	sink   printer.RowSink
+	format string
+	out    io.Writer
+}
+
+// NewSharedSink constructs an empty SharedSink. The first pipeline call
+// builds the underlying sink with its headers; subsequent calls reuse it.
+func NewSharedSink(format string, out io.Writer) *SharedSink {
+	return &SharedSink{format: format, out: out}
+}
+
+// Get returns (constructing on first call) the wrapped sink. Concurrent
+// callers share one sink; writes are mutex-serialized.
+func (s *SharedSink) Get(index bool, headers []string) printer.RowSink {
+	s.once.Do(func() {
+		s.sink = printer.NewConcurrentSink(printer.NewSink(s.format, s.out, index, headers))
+	})
+	return s.sink
+}
+
+// Close finalizes the wrapped sink. Safe to call when no pipeline has written
+// to it yet (the sink is just nil in that case).
+func (s *SharedSink) Close() {
+	if s.sink != nil {
+		s.sink.Close()
+	}
 }
 
 var cfgFile string

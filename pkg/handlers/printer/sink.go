@@ -17,6 +17,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // RowSink is the common interface for streamed table-shaped output. Both
@@ -25,6 +26,36 @@ type RowSink interface {
 	SetSort(col string, desc bool)
 	WriteRow(cols ...any)
 	Close()
+}
+
+// NewConcurrentSink wraps a RowSink with a mutex so it can be written from
+// multiple goroutines safely. Used when --all-regions fans pipelines out and
+// every region's collector writes to the same underlying table.
+func NewConcurrentSink(inner RowSink) RowSink {
+	return &concurrentSink{inner: inner}
+}
+
+type concurrentSink struct {
+	mu    sync.Mutex
+	inner RowSink
+}
+
+func (c *concurrentSink) SetSort(col string, desc bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inner.SetSort(col, desc)
+}
+
+func (c *concurrentSink) WriteRow(cols ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inner.WriteRow(cols...)
+}
+
+func (c *concurrentSink) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inner.Close()
 }
 
 // NewSink constructs a RowSink for the requested format. Unknown formats

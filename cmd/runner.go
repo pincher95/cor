@@ -96,8 +96,8 @@ func runResourceCommand(
 // runAcrossRegions fans the same command out across every enabled region for
 // the account. Each region runs with its own aws.Config + clients + Pricing;
 // regions execute concurrently under a small parallel cap to avoid
-// overwhelming any single API. --delete is disabled in multi-region mode
-// unless --yes is also set (extra blast-radius guard).
+// overwhelming any single API. With --delete, each region's pipeline prompts
+// independently via confirmDelete unless --yes is also set.
 func runAcrossRegions(
 	ctx context.Context,
 	awsCmd *AWSCommand,
@@ -121,12 +121,32 @@ func runAcrossRegions(
 	if err != nil {
 		return fmt.Errorf("multi-region: failed to list regions: %w", err)
 	}
-	if globals.Delete && !globals.AssumeYes {
-		return fmt.Errorf("--all-regions with --delete requires --yes (multi-region blast radius)")
+	if globals.Delete {
+		mode := "per-region confirmation prompts"
+		if globals.AssumeYes {
+			mode = "NO PROMPTS (--yes)"
+		}
+		awsCmd.Logger.LogInfo("multi-region delete enabled", map[string]any{
+			"regions": len(regions),
+			"mode":    mode,
+		})
 	}
 
+	parallelism := 5
+	if globals.Delete && !globals.AssumeYes {
+		// Per-region prompts can't be interleaved sensibly; serialize when
+		// the user expects to confirm interactively.
+		parallelism = 1
+	}
+
+	// One sink across all regions — rows from every region land in a single
+	// unified table. Lazily constructed on the first per-region write so the
+	// header reflects the actual decorated columns (Region + cost).
+	shared := NewSharedSink(globals.Format, cmd.OutOrStdout())
+	defer shared.Close()
+
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(5)
+	g.SetLimit(parallelism)
 	for _, region := range regions {
 		g.Go(func() error {
 			regionalCloudCfg := &handlers.CloudConfig{
@@ -144,6 +164,7 @@ func runAcrossRegions(
 				return nil
 			}
 			regional := newAWSCommandWithFormat(client, regionalCloudCfg, cmd.InOrStdin(), cmd.OutOrStdout(), globals.LogFormat)
+			regional.SharedSink = shared
 			if err := execute(regional, gctx, globals, extras); err != nil {
 				awsCmd.Logger.LogError("multi-region: command failed", err, map[string]any{"region": region})
 			}
