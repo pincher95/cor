@@ -26,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/utils"
@@ -37,6 +38,7 @@ type orphanECRImage struct {
 	digest     string
 	tags       string
 	pushedAt   string
+	sizeBytes  int64
 }
 
 var ecrCmd = &cobra.Command{
@@ -135,6 +137,7 @@ func (a *AWSCommand) executeECR(ctx context.Context, globals *flags.GlobalFlags,
 								digest:     digest,
 								tags:       tagStr,
 								pushedAt:   pushedStr,
+								sizeBytes:  aws.ToInt64(img.ImageSizeInBytes),
 							}); err != nil {
 								return err
 							}
@@ -149,6 +152,10 @@ func (a *AWSCommand) executeECR(ctx context.Context, globals *flags.GlobalFlags,
 		},
 		ToRow: func(r orphanECRImage) []any {
 			return []any{r.repository, r.digest, r.tags, r.pushedAt}
+		},
+		MonthlyCost: func(r orphanECRImage) cost.USD {
+			gb := float64(r.sizeBytes) / (1024 * 1024 * 1024)
+			return cost.USD(gb) * a.Pricing.ECRGB()
 		},
 		DeleteBatch: func(ctx context.Context, rs []orphanECRImage) error {
 			byRepo := make(map[string][]ecrtypes.ImageIdentifier, 8)

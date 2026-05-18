@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/logging"
 	"github.com/pincher95/cor/pkg/handlers/prompter"
@@ -40,6 +41,7 @@ type AWSCommand struct {
 	Logger      *logging.Logger
 	Prompter    prompter.Client
 	Output      io.Writer
+	Pricing     *cost.Pricing
 }
 
 var cfgFile string
@@ -122,6 +124,12 @@ func init() {
 	rootCmd.PersistentFlags().Bool("dry-run", false, "Print what would be deleted without calling AWS delete APIs.")
 	rootCmd.PersistentFlags().String("format", "table", "Output format: table (default), json, or csv.")
 	rootCmd.PersistentFlags().String("state-file", "", "Path to a persistent state file. Already-deleted items recorded there are skipped on re-run.")
+	rootCmd.PersistentFlags().Float64("min-cost", 0, "Only show orphans with estimated monthly cost >= this USD value.")
+	rootCmd.PersistentFlags().Int("top-n", 0, "Show only the N most-expensive orphans (0 = all).")
+	rootCmd.PersistentFlags().Bool("rank", false, "Add a Rank column ordering by estimated monthly cost desc.")
+	rootCmd.PersistentFlags().Bool("all-regions", false, "Scan every enabled region for the current account.")
+	rootCmd.PersistentFlags().String("save-baseline", "", "Write a JSON snapshot of this run's orphans+costs to this path.")
+	rootCmd.PersistentFlags().String("diff-baseline", "", "Read a prior --save-baseline snapshot and emit a delta (added / removed / changed).")
 
 	// imagesCmd.PersistentFlags().String("creation-date", "", "The time when the image was created, in the ISO 8601 format in the UTC time zone (YYYY-MM-DDThh:mm:ss.sssZ), for example, 2021-09-29T11:04:43.305Z . You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day")
 

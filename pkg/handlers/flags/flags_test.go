@@ -26,14 +26,16 @@ type fakeRetriever struct {
 	strings map[string]string
 	bools   map[string]bool
 	ints    map[string]int
+	floats  map[string]float64
 	changed map[string]bool
 }
 
 func (f *fakeRetriever) GetInt(name string) (int, error) { return f.ints[name], nil }
 
-func (f *fakeRetriever) GetString(name string) (string, error) { return f.strings[name], nil }
-func (f *fakeRetriever) GetBool(name string) (bool, error)     { return f.bools[name], nil }
-func (f *fakeRetriever) IsChanged(name string) bool            { return f.changed[name] }
+func (f *fakeRetriever) GetString(name string) (string, error)   { return f.strings[name], nil }
+func (f *fakeRetriever) GetBool(name string) (bool, error)       { return f.bools[name], nil }
+func (f *fakeRetriever) GetFloat64(name string) (float64, error) { return f.floats[name], nil }
+func (f *fakeRetriever) IsChanged(name string) bool              { return f.changed[name] }
 
 func TestGetFlags_ViperFallbackWhenNotChanged(t *testing.T) {
 	viper.Reset()

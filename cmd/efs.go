@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/efs"
 	efstypes "github.com/aws/aws-sdk-go-v2/service/efs/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -121,6 +122,10 @@ func (a *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags,
 			a.Logger.LogInfo("Deleting EFS", map[string]any{"FileSystemId": r.id})
 			_, err := a.AWSClient.EFS.DeleteFileSystem(ctx, &efs.DeleteFileSystemInput{FileSystemId: aws.String(r.id)})
 			return err
+		},
+		MonthlyCost: func(r orphanEFS) cost.USD {
+			gb := float64(r.sizeBytes) / (1024 * 1024 * 1024)
+			return cost.USD(gb) * a.Pricing.EFSStandardGB()
 		},
 	})
 }

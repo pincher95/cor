@@ -24,6 +24,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -33,6 +34,7 @@ import (
 type orphanLBv2 struct {
 	lbName        string
 	lbArn         string
+	lbType        types.LoadBalancerTypeEnum
 	orphanTGs     string
 	unhealthyTGs  string
 	tags          string
@@ -144,6 +146,7 @@ func (a *AWSCommand) executeElbv2(ctx context.Context, globals *flags.GlobalFlag
 			return &orphanLBv2{
 				lbName:        aws.ToString(lb.LoadBalancerName),
 				lbArn:         aws.ToString(lb.LoadBalancerArn),
+				lbType:        lb.Type,
 				orphanTGs:     strings.Join(eval.orphanTargetGroups, "\n"),
 				unhealthyTGs:  strings.Join(eval.unhealthyTargetGroups, "\n"),
 				tags:          tagsValue,
@@ -176,6 +179,15 @@ func (a *AWSCommand) executeElbv2(ctx context.Context, globals *flags.GlobalFlag
 				LoadBalancerArn: aws.String(r.lbArn),
 			})
 			return err
+		},
+		MonthlyCost: func(r orphanLBv2) cost.USD {
+			switch r.lbType {
+			case types.LoadBalancerTypeEnumApplication, types.LoadBalancerTypeEnumNetwork:
+				return cost.USD(cost.HoursPerMonth) * a.Pricing.ALBHour()
+			case types.LoadBalancerTypeEnumGateway:
+				return cost.USD(cost.HoursPerMonth) * a.Pricing.GatewayLBHour()
+			}
+			return 0
 		},
 	})
 }

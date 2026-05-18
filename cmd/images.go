@@ -28,6 +28,7 @@ import (
 	ec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -100,7 +101,8 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 
 	usedByInstances := make(map[string]*imageUsage, 1024)
 	usedByLaunchTemplates := make(map[string]*imageUsage, 1024)
-	var instMu, ltMu sync.Mutex
+	snapshotSizes := make(map[string]int32, 1024)
+	var instMu, ltMu, sizesMu sync.Mutex
 
 	headers := []string{"ami name", "ami id", "creation date", "snapshot ids"}
 	if includeUsedByInstance && !includeUsedByLaunchTemplate {
@@ -117,14 +119,35 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 		Headers:       headers,
 		ResourceLabel: "AMIs",
 		PreScan: func(ctx context.Context) error {
-			return a.scanImageUsage(ctx, scanImageUsageOpts{
-				includeUsedByInstance:       includeUsedByInstance,
-				includeUsedByLaunchTemplate: includeUsedByLaunchTemplate,
-				instances:                   usedByInstances,
-				launchTemplates:             usedByLaunchTemplates,
-				instMu:                      &instMu,
-				ltMu:                        &ltMu,
+			g, gctx := errgroup.WithContext(ctx)
+			g.Go(func() error {
+				return a.scanImageUsage(gctx, scanImageUsageOpts{
+					includeUsedByInstance:       includeUsedByInstance,
+					includeUsedByLaunchTemplate: includeUsedByLaunchTemplate,
+					instances:                   usedByInstances,
+					launchTemplates:             usedByLaunchTemplates,
+					instMu:                      &instMu,
+					ltMu:                        &ltMu,
+				})
 			})
+			g.Go(func() error {
+				p := ec2.NewDescribeSnapshotsPaginator(a.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
+					OwnerIds: []string{"self"},
+				})
+				for p.HasMorePages() {
+					page, err := p.NextPage(gctx)
+					if err != nil {
+						return err
+					}
+					sizesMu.Lock()
+					for _, s := range page.Snapshots {
+						snapshotSizes[aws.ToString(s.SnapshotId)] = aws.ToInt32(s.VolumeSize)
+					}
+					sizesMu.Unlock()
+				}
+				return nil
+			})
+			return g.Wait()
 		},
 		List: func(ctx context.Context, emit func(ec2types.Image) error) error {
 			imageFilters := []ec2types.Filter{}
@@ -219,6 +242,13 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 		},
 		DeleteConcurrency: 5,
 		DedupKey:          func(r orphanImage) string { return r.id },
+		MonthlyCost: func(r orphanImage) cost.USD {
+			var gb float64
+			for _, sid := range r.snapshotIDs {
+				gb += float64(snapshotSizes[sid])
+			}
+			return cost.USD(gb) * a.Pricing.EBSSnapshotGB()
+		},
 	})
 }
 

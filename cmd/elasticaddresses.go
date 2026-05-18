@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/utils"
@@ -114,6 +115,9 @@ func (a *AWSCommand) executeElasticIPs(ctx context.Context, globals *flags.Globa
 			return err
 		},
 		DeleteConcurrency: 5,
+		MonthlyCost: func(r orphanElasticIP) cost.USD {
+			return a.Pricing.ElasticIPMonth()
+		},
 	})
 }
 

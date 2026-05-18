@@ -17,11 +17,14 @@ package cmd
 
 import (
 	"context"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -42,6 +45,7 @@ var snapshotsCmd = &cobra.Command{
 		return runResourceCommand(cmd, CommandSetup{
 			AdditionalFlags: []flags.Flag{
 				{Name: "filter-by-name", Type: "string"},
+				{Name: "keep-latest-per-volume", Type: "int"},
 			},
 			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
 				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
@@ -52,17 +56,33 @@ var snapshotsCmd = &cobra.Command{
 
 func init() {
 	snapshotsCmd.Flags().String("filter-by-name", "", "Filter snapshots by tag:Name (empty = no filter).")
+	snapshotsCmd.Flags().Int("keep-latest-per-volume", 0, "When >0, keep this many most-recent snapshots per source volume; flag older ones as orphans (independent of AMI/volume usage).")
 }
 
 func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	filterByName := normalizeFilterValue((*extras)["filter-by-name"].(string))
+	keepLatest := 0
+	if v, ok := (*extras)["keep-latest-per-volume"].(int); ok {
+		keepLatest = v
+	}
 
 	var usedByImages, usedByVolumes map[string]bool
+	// snapshotsKeep is populated when --keep-latest-per-volume > 0 and lists
+	// the snapshot IDs to KEEP per source volume; everything else is an orphan.
+	snapshotsKeep := map[string]bool{}
 
 	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.Snapshot, orphanSnapshot]{
 		Headers:       []string{"Name", "Snapshot ID", "Size"},
 		ResourceLabel: "snapshots",
 		PreScan: func(ctx context.Context) error {
+			if keepLatest > 0 {
+				keep, err := a.collectKeepLatestSnapshots(ctx, keepLatest)
+				if err != nil {
+					return err
+				}
+				snapshotsKeep = keep
+				return nil
+			}
 			g, gctx := errgroup.WithContext(ctx)
 			g.Go(func() error {
 				m, err := a.collectSnapshotsUsedByImages(gctx)
@@ -112,12 +132,18 @@ func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalF
 			if id == "" {
 				return nil, nil
 			}
-			desc := aws.ToString(snap.Description)
-			if strings.Contains(desc, "Created by CreateImage") || strings.Contains(desc, "Created for policy") {
-				return nil, nil
-			}
-			if usedByImages[id] || usedByVolumes[id] {
-				return nil, nil
+			if keepLatest > 0 {
+				if snapshotsKeep[id] {
+					return nil, nil
+				}
+			} else {
+				desc := aws.ToString(snap.Description)
+				if strings.Contains(desc, "Created by CreateImage") || strings.Contains(desc, "Created for policy") {
+					return nil, nil
+				}
+				if usedByImages[id] || usedByVolumes[id] {
+					return nil, nil
+				}
 			}
 			name := ec2NameTag(snap.Tags)
 			if name == "" {
@@ -142,7 +168,57 @@ func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalF
 		},
 		DeleteConcurrency: 5,
 		DedupKey:          func(r orphanSnapshot) string { return r.id },
+		MonthlyCost: func(r orphanSnapshot) cost.USD {
+			return cost.USD(float64(r.size)) * a.Pricing.EBSSnapshotGB()
+		},
 	})
+}
+
+// collectKeepLatestSnapshots returns the set of snapshot IDs to KEEP under
+// `--keep-latest-per-volume N`: the N most recent snapshots per source
+// VolumeId. Snapshots without a VolumeId (e.g. AMI-only) are kept by default.
+func (a *AWSCommand) collectKeepLatestSnapshots(ctx context.Context, n int) (map[string]bool, error) {
+	type entry struct {
+		id   string
+		when time.Time
+	}
+	byVolume := make(map[string][]entry)
+	keepOrphans := make(map[string]bool)
+
+	p := ec2.NewDescribeSnapshotsPaginator(a.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
+		OwnerIds: []string{"self"},
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, snap := range page.Snapshots {
+			id := aws.ToString(snap.SnapshotId)
+			vol := aws.ToString(snap.VolumeId)
+			if id == "" {
+				continue
+			}
+			if vol == "" {
+				keepOrphans[id] = true
+				continue
+			}
+			t := time.Time{}
+			if snap.StartTime != nil {
+				t = *snap.StartTime
+			}
+			byVolume[vol] = append(byVolume[vol], entry{id: id, when: t})
+		}
+	}
+
+	for _, snaps := range byVolume {
+		sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].when.After(snaps[j].when) })
+		limit := min(n, len(snaps))
+		for i := range limit {
+			keepOrphans[snaps[i].id] = true
+		}
+	}
+	return keepOrphans, nil
 }
 
 func (a *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[string]bool, error) {

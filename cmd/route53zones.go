@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -117,6 +118,9 @@ func (a *AWSCommand) executeRoute53Zones(ctx context.Context, globals *flags.Glo
 				Id: aws.String(r.id),
 			})
 			return err
+		},
+		MonthlyCost: func(r orphanRoute53Zone) cost.USD {
+			return a.Pricing.Route53ZoneMonth()
 		},
 	})
 }

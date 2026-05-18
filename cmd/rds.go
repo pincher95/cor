@@ -21,6 +21,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -48,11 +49,20 @@ func init() {
 	rdsCmd.Flags().Bool("include-snapshots", false, "Include manual RDS snapshots")
 }
 
+type rdsKind string
+
+const (
+	rdsInstance rdsKind = "Instance"
+	rdsSnapshot rdsKind = "Snapshot"
+)
+
 type rdsResource struct {
-	Type    string
+	Type    rdsKind
 	ID      string
 	Status  string
 	Created string
+	Class   string
+	SizeGB  int32
 }
 
 func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
@@ -81,10 +91,12 @@ func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 						created = inst.InstanceCreateTime.UTC().Format(time.RFC3339)
 					}
 					if err := emit(rdsResource{
-						Type:    "Instance",
+						Type:    rdsInstance,
 						ID:      aws.ToString(inst.DBInstanceIdentifier),
 						Status:  aws.ToString(inst.DBInstanceStatus),
 						Created: created,
+						Class:   aws.ToString(inst.DBInstanceClass),
+						SizeGB:  aws.ToInt32(inst.AllocatedStorage),
 					}); err != nil {
 						return err
 					}
@@ -109,10 +121,11 @@ func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 						created = snap.SnapshotCreateTime.UTC().Format(time.RFC3339)
 					}
 					if err := emit(rdsResource{
-						Type:    "Snapshot",
+						Type:    rdsSnapshot,
 						ID:      aws.ToString(snap.DBSnapshotIdentifier),
 						Status:  aws.ToString(snap.Status),
 						Created: created,
+						SizeGB:  aws.ToInt32(snap.AllocatedStorage),
 					}); err != nil {
 						return err
 					}
@@ -134,14 +147,14 @@ func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 		},
 		Delete: func(ctx context.Context, r rdsResource) error {
 			switch r.Type {
-			case "Instance":
+			case rdsInstance:
 				a.Logger.LogInfo("Deleting RDS Instance (SkipFinalSnapshot=true)", map[string]any{"ID": r.ID})
 				_, err := a.AWSClient.RDS.DeleteDBInstance(ctx, &rds.DeleteDBInstanceInput{
 					DBInstanceIdentifier: aws.String(r.ID),
 					SkipFinalSnapshot:    aws.Bool(true),
 				})
 				return err
-			case "Snapshot":
+			case rdsSnapshot:
 				a.Logger.LogInfo("Deleting DB Snapshot", map[string]any{"ID": r.ID})
 				_, err := a.AWSClient.RDS.DeleteDBSnapshot(ctx, &rds.DeleteDBSnapshotInput{
 					DBSnapshotIdentifier: aws.String(r.ID),
@@ -149,6 +162,18 @@ func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags,
 				return err
 			}
 			return nil
+		},
+		MonthlyCost: func(r rdsResource) cost.USD {
+			switch r.Type {
+			case rdsInstance:
+				// Stopped instances still incur storage charges (~half the
+				// running rate is a reasonable approximation since we don't
+				// model storage separately).
+				return a.Pricing.RDSInstanceClassMonth(r.Class) * 0.5
+			case rdsSnapshot:
+				return cost.USD(float64(r.SizeGB)) * a.Pricing.RDSManualSnapshotGB()
+			}
+			return 0
 		},
 	})
 }

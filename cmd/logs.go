@@ -23,15 +23,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	cwltypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
 )
 
 type orphanLogGroup struct {
-	name      string
-	storedStr string
-	retention string
+	name        string
+	storedBytes int64
+	storedStr   string
+	retention   string
 }
 
 var logsCmd = &cobra.Command{
@@ -96,9 +98,10 @@ func (a *AWSCommand) executeLogs(ctx context.Context, globals *flags.GlobalFlags
 				storedStr = fmt.Sprintf("%d MB", stored/(1024*1024))
 			}
 			return &orphanLogGroup{
-				name:      aws.ToString(lg.LogGroupName),
-				storedStr: storedStr,
-				retention: retention,
+				name:        aws.ToString(lg.LogGroupName),
+				storedBytes: stored,
+				storedStr:   storedStr,
+				retention:   retention,
 			}, nil
 		},
 		ToRow: func(r orphanLogGroup) []any {
@@ -112,5 +115,9 @@ func (a *AWSCommand) executeLogs(ctx context.Context, globals *flags.GlobalFlags
 			return err
 		},
 		DeleteConcurrency: 10,
+		MonthlyCost: func(r orphanLogGroup) cost.USD {
+			gb := float64(r.storedBytes) / (1024 * 1024 * 1024)
+			return cost.USD(gb) * a.Pricing.CloudWatchLogsGB()
+		},
 	})
 }

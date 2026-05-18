@@ -27,19 +27,25 @@ import (
 // read them directly from this struct; the extras map returned alongside
 // holds only per-command flags.
 type GlobalFlags struct {
-	Region      string
-	Profile     string
-	AuthMethod  string
-	Delete      bool
-	SortBy      string
-	SortDesc    bool
-	AssumeYes   bool
-	OnError     string
-	LogFormat   string
-	MetricsFile string
-	DryRun      bool
-	Format      string
-	StateFile   string
+	Region       string
+	Profile      string
+	AuthMethod   string
+	Delete       bool
+	SortBy       string
+	SortDesc     bool
+	AssumeYes    bool
+	OnError      string
+	LogFormat    string
+	MetricsFile  string
+	DryRun       bool
+	Format       string
+	StateFile    string
+	MinCost      float64
+	TopN         int
+	Rank         bool
+	AllRegions   bool
+	SaveBaseline string
+	DiffBaseline string
 }
 
 // FlagRetriever defines an interface for retrieving flags.
@@ -47,6 +53,7 @@ type FlagRetriever interface {
 	GetString(name string) (string, error)
 	GetBool(name string) (bool, error)
 	GetInt(name string) (int, error)
+	GetFloat64(name string) (float64, error)
 	// IsChanged returns true if a flag value was explicitly provided on the CLI.
 	// This is used to ensure correct precedence: CLI > config file > env > defaults.
 	IsChanged(name string) bool
@@ -97,6 +104,17 @@ func (r *CommandFlagRetriever) GetInt(name string) (int, error) {
 	return r.Cmd.PersistentFlags().GetInt(name)
 }
 
+// GetFloat64 retrieves a float64 flag from the cobra command.
+func (r *CommandFlagRetriever) GetFloat64(name string) (float64, error) {
+	if r.Cmd.Flags().Lookup(name) != nil {
+		return r.Cmd.Flags().GetFloat64(name)
+	}
+	if r.Cmd.InheritedFlags().Lookup(name) != nil {
+		return r.Cmd.InheritedFlags().GetFloat64(name)
+	}
+	return r.Cmd.PersistentFlags().GetFloat64(name)
+}
+
 func (r *CommandFlagRetriever) IsChanged(name string) bool {
 	// pflag.FlagSet.Changed(name) returns false if the flag is not defined in that set,
 	// so we can safely check all relevant sets.
@@ -119,6 +137,18 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*GlobalFlags
 			return viper.GetBool(name), nil
 		}
 		return flagRetriever.GetBool(name)
+	}
+	getFloat64 := func(name string) (float64, error) {
+		if !flagRetriever.IsChanged(name) && viper.IsSet(name) {
+			return viper.GetFloat64(name), nil
+		}
+		return flagRetriever.GetFloat64(name)
+	}
+	getInt := func(name string) (int, error) {
+		if !flagRetriever.IsChanged(name) && viper.IsSet(name) {
+			return viper.GetInt(name), nil
+		}
+		return flagRetriever.GetInt(name)
 	}
 
 	globals := &GlobalFlags{}
@@ -160,6 +190,24 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*GlobalFlags
 		return nil, nil, err
 	}
 	if globals.StateFile, err = getString("state-file"); err != nil {
+		return nil, nil, err
+	}
+	if globals.MinCost, err = getFloat64("min-cost"); err != nil {
+		return nil, nil, err
+	}
+	if globals.TopN, err = getInt("top-n"); err != nil {
+		return nil, nil, err
+	}
+	if globals.Rank, err = getBool("rank"); err != nil {
+		return nil, nil, err
+	}
+	if globals.AllRegions, err = getBool("all-regions"); err != nil {
+		return nil, nil, err
+	}
+	if globals.SaveBaseline, err = getString("save-baseline"); err != nil {
+		return nil, nil, err
+	}
+	if globals.DiffBaseline, err = getString("diff-baseline"); err != nil {
 		return nil, nil, err
 	}
 

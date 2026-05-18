@@ -25,6 +25,7 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -127,6 +128,16 @@ func (a *AWSCommand) executeDynamoDB(ctx context.Context, globals *flags.GlobalF
 			}
 			return nil
 		},
+		MonthlyCost: func(r orphanDynamoDBTable) cost.USD {
+			gb := float64(r.TableSize) / (1024 * 1024 * 1024)
+			storage := cost.USD(gb) * a.Pricing.DynamoDBStorageGB()
+			if r.BillingMode != "PROVISIONED" {
+				return storage
+			}
+			wcu := cost.USD(r.WriteCapacity) * a.Pricing.DynamoDBWCUMonth()
+			rcu := cost.USD(r.ReadCapacity) * a.Pricing.DynamoDBRCUMonth()
+			return storage + wcu + rcu
+		},
 	})
 }
 
@@ -141,72 +152,20 @@ func (a *AWSCommand) checkDynamoDBOrphan(ctx context.Context, tableName string, 
 
 	table := describeOutput.Table
 
-	// Check read/write activity using CloudWatch metrics
-	endTime := time.Now()
-	startTime := endTime.Add(-time.Duration(daysNoActivity) * 24 * time.Hour)
-
-	// Check consumed read capacity
-	readInput := &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/DynamoDB"),
-		MetricName: aws.String("ConsumedReadCapacityUnits"),
-		Dimensions: []cloudwatchtypes.Dimension{
-			{
-				Name:  aws.String("TableName"),
-				Value: aws.String(tableName),
-			},
-		},
-		StartTime:  &startTime,
-		EndTime:    &endTime,
-		Period:     aws.Int32(86400), // 1 day
-		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
+	window := time.Duration(daysNoActivity) * 24 * time.Hour
+	dim := []cloudwatchtypes.Dimension{{Name: aws.String("TableName"), Value: aws.String(tableName)}}
+	idleReads, err := a.IsIdle(ctx, IdleSpec{Namespace: "AWS/DynamoDB", MetricName: "ConsumedReadCapacityUnits", Dimensions: dim, Window: window})
+	if err != nil {
+		return nil, err
 	}
-
-	readOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, readInput)
+	idleWrites, err := a.IsIdle(ctx, IdleSpec{Namespace: "AWS/DynamoDB", MetricName: "ConsumedWriteCapacityUnits", Dimensions: dim, Window: window})
 	if err != nil {
 		return nil, err
 	}
 
-	hasReads := false
-	for _, datapoint := range readOutput.Datapoints {
-		if datapoint.Sum != nil && *datapoint.Sum > 0 {
-			hasReads = true
-			break
-		}
-	}
-
-	// Check consumed write capacity
-	writeInput := &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/DynamoDB"),
-		MetricName: aws.String("ConsumedWriteCapacityUnits"),
-		Dimensions: []cloudwatchtypes.Dimension{
-			{
-				Name:  aws.String("TableName"),
-				Value: aws.String(tableName),
-			},
-		},
-		StartTime:  &startTime,
-		EndTime:    &endTime,
-		Period:     aws.Int32(86400),
-		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
-	}
-
-	writeOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, writeInput)
-	if err != nil {
-		return nil, err
-	}
-
-	hasWrites := false
-	for _, datapoint := range writeOutput.Datapoints {
-		if datapoint.Sum != nil && *datapoint.Sum > 0 {
-			hasWrites = true
-			break
-		}
-	}
-
-	// Determine orphan status
 	itemCount := aws.ToInt64(table.ItemCount)
 	isEmpty := itemCount == 0
-	noActivity := !hasReads && !hasWrites
+	noActivity := idleReads && idleWrites
 
 	// Only flag as orphan if no activity
 	if !noActivity && !isEmpty {

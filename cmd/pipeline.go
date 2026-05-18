@@ -16,11 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pincher95/cor/pkg/cost"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/handlers/printer"
 	"golang.org/x/sync/errgroup"
@@ -28,12 +30,13 @@ import (
 
 // runMetrics captures observable counts and timing for a single pipeline run.
 type runMetrics struct {
-	Resource  string    `json:"resource"`
-	Items     int64     `json:"items"`
-	Results   int64     `json:"results"`
-	Deletes   int64     `json:"deletes"`
-	ElapsedMs int64     `json:"elapsed_ms"`
-	StartedAt time.Time `json:"started_at"`
+	Resource       string    `json:"resource"`
+	Items          int64     `json:"items"`
+	Results        int64     `json:"results"`
+	Deletes        int64     `json:"deletes"`
+	EstMonthlyCost float64   `json:"est_monthly_cost"`
+	ElapsedMs      int64     `json:"elapsed_ms"`
+	StartedAt      time.Time `json:"started_at"`
 }
 
 // DeleteErrorPolicy controls how the delete phase reacts to per-item errors.
@@ -83,6 +86,12 @@ type OrphanPipeline[Item, Result any] struct {
 	// DedupKey returns a stable identity per Result. Required for --state-file
 	// resumable runs; nil opts out.
 	DedupKey func(r Result) string
+
+	// MonthlyCost returns the estimated monthly USD for one Result. When
+	// non-nil, the pipeline auto-appends an "Est $/mo" column and (in the
+	// absence of a Finalize) a totals row, plus populates the run metrics
+	// EstMonthlyCost field.
+	MonthlyCost func(r Result) cost.USD
 }
 
 // runOrphanPipeline runs the shared producer → workers → collector pattern
@@ -115,11 +124,19 @@ func runOrphanPipeline[Item, Result any](
 
 	metrics := runMetrics{Resource: spec.ResourceLabel, StartedAt: time.Now()}
 	var itemCount, resultCount, deleteCount atomic.Int64
+	collected := make([]Result, 0)
 	defer func() {
 		metrics.Items = itemCount.Load()
 		metrics.Results = resultCount.Load()
 		metrics.Deletes = deleteCount.Load()
 		metrics.ElapsedMs = time.Since(metrics.StartedAt).Milliseconds()
+		if spec.MonthlyCost != nil {
+			var total cost.USD
+			for _, r := range collected {
+				total += spec.MonthlyCost(r)
+			}
+			metrics.EstMonthlyCost = float64(total)
+		}
 		emitRunMetrics(a, globals, metrics)
 	}()
 
@@ -179,21 +196,33 @@ func runOrphanPipeline[Item, Result any](
 		})
 	}
 
-	collected := make([]Result, 0)
+	headers, toRow := decorateForCost(spec)
+	if globals.AllRegions {
+		headers, toRow = decorateForRegion(headers, toRow, *a.CloudConfig.Region)
+	}
+	costFiltered := spec.MonthlyCost != nil && (globals.MinCost > 0 || globals.TopN > 0 || globals.Rank)
 	collectorDone := make(chan struct{})
 	go func() {
 		defer close(collectorDone)
-		stream := printer.NewSink(globals.Format, a.Output, !spec.HideIndex, spec.Headers)
-		stream.SetSort(globals.SortBy, globals.SortDesc)
+		if costFiltered {
+			for r := range resultChan {
+				collected = append(collected, r)
+			}
+			return
+		}
+		stream := printer.NewSink(globals.Format, a.Output, !spec.HideIndex, headers)
+		stream.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
 		defer stream.Close()
 		for r := range resultChan {
-			stream.WriteRow(spec.ToRow(r)...)
+			stream.WriteRow(toRow(r)...)
 			collected = append(collected, r)
 		}
 		if spec.Finalize != nil {
 			if row := spec.Finalize(collected); row != nil {
 				stream.WriteRow(row...)
 			}
+		} else if spec.MonthlyCost != nil && len(collected) > 0 {
+			stream.WriteRow(buildCostFooter(headers, collected, spec.MonthlyCost)...)
 		}
 	}()
 
@@ -202,6 +231,24 @@ func runOrphanPipeline[Item, Result any](
 	<-collectorDone
 	if waitErr != nil {
 		return waitErr
+	}
+
+	if costFiltered {
+		collected = applyCostFilters(collected, spec.MonthlyCost, globals)
+		renderCostFiltered(a, globals, spec, headers, toRow, collected)
+	}
+
+	if globals.SaveBaseline != "" {
+		if err := writeBaseline(globals.SaveBaseline, spec.ResourceLabel, collected, spec.DedupKey, spec.MonthlyCost, toRow); err != nil {
+			a.Logger.LogError("failed to write baseline", err, map[string]any{"path": globals.SaveBaseline})
+		}
+	}
+	if globals.DiffBaseline != "" {
+		if spec.DedupKey == nil {
+			a.Logger.LogError("--diff-baseline requires the command to define DedupKey", nil, map[string]any{"resource": spec.ResourceLabel})
+		} else if err := diffBaseline(a.Output, globals.DiffBaseline, spec.ResourceLabel, collected, spec.DedupKey, spec.MonthlyCost); err != nil {
+			a.Logger.LogError("failed to diff baseline", err, map[string]any{"path": globals.DiffBaseline})
+		}
 	}
 
 	if spec.ResourceLabel != "" {
@@ -320,6 +367,216 @@ func appendStateFile(path string, keys []string) error {
 		}
 	}
 	return nil
+}
+
+// resolveSortKey maps the user-friendly "cost" alias (case-insensitive) to
+// the auto-generated "Est $/mo" column header.
+func resolveSortKey(s string) string {
+	if strings.EqualFold(strings.TrimSpace(s), "cost") {
+		return "Est $/mo"
+	}
+	return s
+}
+
+// buildCostFooter returns a footer row with "Total (N)" in the first cell and
+// the sum of MonthlyCost in the last cell.
+func buildCostFooter[Result any](headers []string, collected []Result, price func(Result) cost.USD) []any {
+	var total cost.USD
+	for _, r := range collected {
+		total += price(r)
+	}
+	footer := make([]any, len(headers))
+	footer[0] = fmt.Sprintf("Total (%d)", len(collected))
+	for i := 1; i < len(footer)-1; i++ {
+		footer[i] = ""
+	}
+	footer[len(footer)-1] = total
+	return footer
+}
+
+// applyCostFilters sorts collected by cost desc and clips it according to
+// MinCost / TopN. Uses a Schwartzian transform — costs are computed once
+// before sorting instead of O(n log n) times inside the comparator, which
+// matters when price involves a map lookup (e.g. RDS instance class).
+func applyCostFilters[Result any](collected []Result, price func(Result) cost.USD, globals *flags.GlobalFlags) []Result {
+	type indexed struct {
+		r Result
+		c cost.USD
+	}
+	pairs := make([]indexed, len(collected))
+	for i, r := range collected {
+		pairs[i] = indexed{r: r, c: price(r)}
+	}
+	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].c > pairs[j].c })
+
+	cut := len(pairs)
+	if globals.MinCost > 0 {
+		for i, p := range pairs {
+			if float64(p.c) < globals.MinCost {
+				cut = i
+				break
+			}
+		}
+	}
+	if globals.TopN > 0 && globals.TopN < cut {
+		cut = globals.TopN
+	}
+	out := make([]Result, cut)
+	for i := 0; i < cut; i++ {
+		out[i] = pairs[i].r
+	}
+	return out
+}
+
+// renderCostFiltered writes the post-filtered rows (with optional Rank column)
+// plus the Finalize/cost footer to a fresh sink. Used after applyCostFilters.
+func renderCostFiltered[Item, Result any](
+	a *AWSCommand,
+	globals *flags.GlobalFlags,
+	spec OrphanPipeline[Item, Result],
+	headers []string,
+	toRow func(Result) []any,
+	collected []Result,
+) {
+	outHeaders := headers
+	outToRow := toRow
+	if globals.Rank {
+		outHeaders = append([]string{"Rank"}, headers...)
+		rank := 0
+		outToRow = func(r Result) []any {
+			rank++
+			return append([]any{rank}, toRow(r)...)
+		}
+	}
+	stream := printer.NewSink(globals.Format, a.Output, !spec.HideIndex, outHeaders)
+	stream.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
+	defer stream.Close()
+	for _, r := range collected {
+		stream.WriteRow(outToRow(r)...)
+	}
+	if spec.Finalize != nil {
+		if row := spec.Finalize(collected); row != nil {
+			stream.WriteRow(row...)
+		}
+	} else if spec.MonthlyCost != nil && len(collected) > 0 {
+		stream.WriteRow(buildCostFooter(outHeaders, collected, spec.MonthlyCost)...)
+	}
+}
+
+// decorateForRegion prepends a "Region" column and wraps toRow to emit the
+// given region as the first cell. Used by --all-regions mode.
+func decorateForRegion[Result any](headers []string, toRow func(Result) []any, region string) ([]string, func(Result) []any) {
+	out := append([]string{"Region"}, headers...)
+	inner := toRow
+	return out, func(r Result) []any {
+		return append([]any{region}, inner(r)...)
+	}
+}
+
+// decorateForCost appends the "Est $/mo" column to spec.Headers and wraps
+// spec.ToRow when spec.MonthlyCost is set. The original slices/closures are
+// returned unchanged when MonthlyCost is nil.
+func decorateForCost[Item, Result any](spec OrphanPipeline[Item, Result]) ([]string, func(Result) []any) {
+	if spec.MonthlyCost == nil {
+		return spec.Headers, spec.ToRow
+	}
+	headers := append(append([]string{}, spec.Headers...), "Est $/mo")
+	inner := spec.ToRow
+	priceFn := spec.MonthlyCost
+	wrapped := func(r Result) []any {
+		return append(inner(r), priceFn(r))
+	}
+	return headers, wrapped
+}
+
+// runOrphanRollup is a list-only variant of runOrphanPipeline used by the
+// `cor cost` command. It runs the producer→workers stages and returns the
+// collected results and their summed MonthlyCost without streaming any
+// output and without invoking Delete. PreScan is honored.
+func runOrphanRollup[Item, Result any](
+	a *AWSCommand,
+	ctx context.Context,
+	spec OrphanPipeline[Item, Result],
+) (int, cost.USD, error) {
+	producers, err := resolveProducers(spec)
+	if err != nil {
+		return 0, 0, err
+	}
+	if spec.PreScan != nil {
+		if err := spec.PreScan(ctx); err != nil {
+			return 0, 0, err
+		}
+	}
+
+	itemChan := make(chan Item, 50)
+	resultChan := make(chan Result, 50)
+	g, egCtx := errgroup.WithContext(ctx)
+
+	var producerWG sync.WaitGroup
+	producerWG.Add(len(producers))
+	for _, p := range producers {
+		g.Go(func() error {
+			defer producerWG.Done()
+			return p(egCtx, func(item Item) error {
+				select {
+				case itemChan <- item:
+					return nil
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			})
+		})
+	}
+	go func() {
+		producerWG.Wait()
+		close(itemChan)
+	}()
+
+	for range NumGoroutines {
+		g.Go(func() error {
+			for item := range itemChan {
+				if err := egCtx.Err(); err != nil {
+					return err
+				}
+				r, err := spec.Process(egCtx, item)
+				if err != nil {
+					return err
+				}
+				if r == nil {
+					continue
+				}
+				select {
+				case resultChan <- *r:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			}
+			return nil
+		})
+	}
+
+	collected := make([]Result, 0)
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for r := range resultChan {
+			collected = append(collected, r)
+		}
+	}()
+
+	waitErr := g.Wait()
+	close(resultChan)
+	<-collectorDone
+	if waitErr != nil {
+		return 0, 0, waitErr
+	}
+	var total cost.USD
+	if spec.MonthlyCost != nil {
+		for _, r := range collected {
+			total += spec.MonthlyCost(r)
+		}
+	}
+	return len(collected), total, nil
 }
 
 // resolveProducers returns the producer functions to run: spec.Lists when

@@ -25,6 +25,7 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
 	elasticachetypes "github.com/aws/aws-sdk-go-v2/service/elasticache/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -125,78 +126,39 @@ func (a *AWSCommand) executeElastiCache(ctx context.Context, globals *flags.Glob
 			}
 			return nil
 		},
+		MonthlyCost: func(r orphanElastiCacheCluster) cost.USD {
+			return cost.USD(r.NumNodes) * a.Pricing.ElastiCacheNodeMonth(r.CacheNodeType)
+		},
 	})
 }
 
 func (a *AWSCommand) checkElastiCacheOrphan(ctx context.Context, cluster *elasticachetypes.CacheCluster, hoursZeroConnections int64) (*orphanElastiCacheCluster, error) {
 	clusterID := aws.ToString(cluster.CacheClusterId)
+	window := time.Duration(hoursZeroConnections) * time.Hour
+	dim := []cloudwatchtypes.Dimension{{Name: aws.String("CacheClusterId"), Value: aws.String(clusterID)}}
 
-	// Check connections metric using CloudWatch
-	endTime := time.Now()
-	startTime := endTime.Add(-time.Duration(hoursZeroConnections) * time.Hour)
-
-	// Check CurrConnections metric
-	connectionsInput := &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/ElastiCache"),
-		MetricName: aws.String("CurrConnections"),
-		Dimensions: []cloudwatchtypes.Dimension{
-			{
-				Name:  aws.String("CacheClusterId"),
-				Value: aws.String(clusterID),
-			},
-		},
-		StartTime:  &startTime,
-		EndTime:    &endTime,
-		Period:     aws.Int32(3600), // 1 hour
-		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticAverage, cloudwatchtypes.StatisticMaximum},
-	}
-
-	connectionsOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, connectionsInput)
+	idleConn, err := a.IsIdle(ctx, IdleSpec{
+		Namespace:  "AWS/ElastiCache",
+		MetricName: "CurrConnections",
+		Dimensions: dim,
+		Window:     window,
+		Statistic:  cloudwatchtypes.StatisticMaximum,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Check if cluster has had any connections
-	hasConnections := false
-	for _, datapoint := range connectionsOutput.Datapoints {
-		if datapoint.Average != nil && *datapoint.Average > 0 {
-			hasConnections = true
-			break
-		}
-		if datapoint.Maximum != nil && *datapoint.Maximum > 0 {
-			hasConnections = true
-			break
-		}
-	}
-
-	// Check network bytes in/out
-	networkBytesInput := &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/ElastiCache"),
-		MetricName: aws.String("NetworkBytesIn"),
-		Dimensions: []cloudwatchtypes.Dimension{
-			{
-				Name:  aws.String("CacheClusterId"),
-				Value: aws.String(clusterID),
-			},
-		},
-		StartTime:  &startTime,
-		EndTime:    &endTime,
-		Period:     aws.Int32(3600),
-		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
-	}
-
-	networkOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, networkBytesInput)
+	hasConnections := !idleConn
+	idleNetwork, err := a.IsIdle(ctx, IdleSpec{
+		Namespace:  "AWS/ElastiCache",
+		MetricName: "NetworkBytesIn",
+		Dimensions: dim,
+		Window:     window,
+		Threshold:  1000,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	hasNetworkActivity := false
-	for _, datapoint := range networkOutput.Datapoints {
-		if datapoint.Sum != nil && *datapoint.Sum > 1000 { // More than 1KB
-			hasNetworkActivity = true
-			break
-		}
-	}
+	hasNetworkActivity := !idleNetwork
 
 	// Calculate days since creation
 	var daysSinceCreation int64

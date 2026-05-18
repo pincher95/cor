@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -34,6 +35,7 @@ type orphanS3Bucket struct {
 	IsEmpty            bool
 	IncompleteUploads  int
 	HasLifecyclePolicy bool
+	SizeBytes          int64
 	Reason             string
 }
 
@@ -132,6 +134,13 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.Global
 				return err
 			}
 			return nil
+		},
+		MonthlyCost: func(r orphanS3Bucket) cost.USD {
+			if r.SizeBytes <= 0 {
+				return 0
+			}
+			gb := float64(r.SizeBytes) / (1024 * 1024 * 1024)
+			return cost.USD(gb) * a.Pricing.S3StandardGB()
 		},
 	})
 }

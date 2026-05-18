@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -105,6 +106,9 @@ func (a *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.Glob
 			a.Logger.LogInfo("Deleting NAT Gateway", map[string]any{"ID": r.id, "Name": r.name})
 			_, err := a.AWSClient.EC2.DeleteNatGateway(ctx, &ec2.DeleteNatGatewayInput{NatGatewayId: aws.String(r.id)})
 			return err
+		},
+		MonthlyCost: func(r orphanNatGateway) cost.USD {
+			return cost.USD(cost.HoursPerMonth) * a.Pricing.NATGatewayHour()
 		},
 	})
 }

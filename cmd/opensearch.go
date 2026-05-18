@@ -25,6 +25,7 @@ import (
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/opensearch"
 	opensearchtypes "github.com/aws/aws-sdk-go-v2/service/opensearch/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -140,82 +141,44 @@ func (a *AWSCommand) executeOpenSearch(ctx context.Context, globals *flags.Globa
 			}
 			return nil
 		},
+		MonthlyCost: func(r orphanOpenSearchDomain) cost.USD {
+			nodes := cost.USD(r.InstanceCount) * a.Pricing.OpenSearchNodeMonth(r.InstanceType)
+			// 0.135/GB-month is an industry-standard EBS rate for OpenSearch storage;
+			// captured under EBSVolume["gp3"] which is close enough.
+			storage := cost.USD(float64(r.StorageSize)) * a.Pricing.EBSVolumeGB("gp3")
+			return nodes + storage
+		},
 	})
 }
 
 func (a *AWSCommand) checkOpenSearchOrphan(ctx context.Context, domain *opensearchtypes.DomainStatus, daysNoIndexing, hoursNoSearches int64) (*orphanOpenSearchDomain, error) {
 	domainName := aws.ToString(domain.DomainName)
-
-	// Check indexing operations metric
-	endTime := time.Now()
-	indexingStartTime := endTime.Add(-time.Duration(daysNoIndexing) * 24 * time.Hour)
-
-	indexingInput := &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/ES"), // Both ES and OpenSearch use AWS/ES namespace
-		MetricName: aws.String("IndexingRate"),
-		Dimensions: []cloudwatchtypes.Dimension{
-			{
-				Name:  aws.String("DomainName"),
-				Value: aws.String(domainName),
-			},
-			{
-				Name:  aws.String("ClientId"),
-				Value: domain.ARN, // Use account ID from ARN
-			},
-		},
-		StartTime:  &indexingStartTime,
-		EndTime:    &endTime,
-		Period:     aws.Int32(86400), // 1 day
-		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
+	dim := []cloudwatchtypes.Dimension{
+		{Name: aws.String("DomainName"), Value: aws.String(domainName)},
+		{Name: aws.String("ClientId"), Value: domain.ARN},
 	}
 
-	indexingOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, indexingInput)
+	idleIndex, err := a.IsIdle(ctx, IdleSpec{
+		Namespace:  "AWS/ES",
+		MetricName: "IndexingRate",
+		Dimensions: dim,
+		Window:     time.Duration(daysNoIndexing) * 24 * time.Hour,
+	})
 	if err != nil {
 		return nil, err
 	}
+	hasIndexing := !idleIndex
 
-	hasIndexing := false
-	for _, datapoint := range indexingOutput.Datapoints {
-		if datapoint.Sum != nil && *datapoint.Sum > 0 {
-			hasIndexing = true
-			break
-		}
-	}
-
-	// Check search requests metric
-	searchStartTime := endTime.Add(-time.Duration(hoursNoSearches) * time.Hour)
-
-	searchInput := &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/ES"),
-		MetricName: aws.String("SearchRate"),
-		Dimensions: []cloudwatchtypes.Dimension{
-			{
-				Name:  aws.String("DomainName"),
-				Value: aws.String(domainName),
-			},
-			{
-				Name:  aws.String("ClientId"),
-				Value: domain.ARN,
-			},
-		},
-		StartTime:  &searchStartTime,
-		EndTime:    &endTime,
-		Period:     aws.Int32(3600), // 1 hour
-		Statistics: []cloudwatchtypes.Statistic{cloudwatchtypes.StatisticSum},
-	}
-
-	searchOutput, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, searchInput)
+	idleSearch, err := a.IsIdle(ctx, IdleSpec{
+		Namespace:  "AWS/ES",
+		MetricName: "SearchRate",
+		Dimensions: dim,
+		Window:     time.Duration(hoursNoSearches) * time.Hour,
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	hasSearches := false
-	for _, datapoint := range searchOutput.Datapoints {
-		if datapoint.Sum != nil && *datapoint.Sum > 0 {
-			hasSearches = true
-			break
-		}
-	}
+	hasSearches := !idleSearch
 
 	// Determine if orphaned (must have both no indexing AND no searches)
 	if hasIndexing || hasSearches {

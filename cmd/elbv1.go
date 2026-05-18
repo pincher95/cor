@@ -24,6 +24,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -189,6 +190,9 @@ func (a *AWSCommand) executeElbv1(ctx context.Context, globals *flags.GlobalFlag
 				LoadBalancerName: aws.String(r.deleteCandidateID),
 			})
 			return err
+		},
+		MonthlyCost: func(r orphanLBv1) cost.USD {
+			return a.Pricing.ClassicELBMonth()
 		},
 	})
 }

@@ -21,14 +21,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
 )
 
 type orphanVolume struct {
-	name, id, snapshotID string
-	size                 int32
+	name, id, snapshotID, volumeType string
+	size                             int32
 }
 
 // volumesListCmd represents the volumes command
@@ -87,11 +88,15 @@ func (a *AWSCommand) executeVolumes(ctx context.Context, globals *flags.GlobalFl
 				name:       name,
 				id:         aws.ToString(vol.VolumeId),
 				snapshotID: aws.ToString(vol.SnapshotId),
+				volumeType: string(vol.VolumeType),
 				size:       aws.ToInt32(vol.Size),
 			}, nil
 		},
 		ToRow: func(r orphanVolume) []any {
 			return []any{r.name, r.id, r.snapshotID, r.size}
+		},
+		MonthlyCost: func(r orphanVolume) cost.USD {
+			return cost.USD(float64(r.size)) * a.Pricing.EBSVolumeGB(r.volumeType)
 		},
 		Finalize: func(results []orphanVolume) []any {
 			var total int32

@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -118,6 +119,13 @@ func (a *AWSCommand) executeTGWAttachments(ctx context.Context, globals *flags.G
 				TransitGatewayAttachmentId: aws.String(r.id),
 			})
 			return err
+		},
+		MonthlyCost: func(r orphanTGWAttachment) cost.USD {
+			// $0.05/hour per VPC attachment; non-VPC types not modeled.
+			if r.resourceType != string(ec2types.TransitGatewayAttachmentResourceTypeVpc) {
+				return 0
+			}
+			return cost.USD(cost.HoursPerMonth) * 0.05
 		},
 	})
 }

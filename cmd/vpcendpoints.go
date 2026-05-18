@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/pincher95/cor/pkg/utils"
@@ -32,9 +33,10 @@ type orphanVPCEndpoint struct {
 	name     string
 	id       string
 	service  string
-	epType   string
+	epType   ec2types.VpcEndpointType
 	state    string
 	eniCount int
+	subnets  int
 }
 
 var vpcEndpointsCmd = &cobra.Command{
@@ -110,13 +112,24 @@ func (a *AWSCommand) executeVPCEndpoints(ctx context.Context, globals *flags.Glo
 				name:     name,
 				id:       aws.ToString(ep.VpcEndpointId),
 				service:  service,
-				epType:   string(ep.VpcEndpointType),
+				epType:   ep.VpcEndpointType,
 				state:    string(ep.State),
 				eniCount: eniCount,
+				subnets:  len(ep.SubnetIds),
 			}, nil
 		},
 		ToRow: func(r orphanVPCEndpoint) []any {
-			return []any{r.name, r.id, r.service, r.epType, r.state, r.eniCount}
+			return []any{r.name, r.id, r.service, string(r.epType), r.state, r.eniCount}
+		},
+		MonthlyCost: func(r orphanVPCEndpoint) cost.USD {
+			if r.epType != ec2types.VpcEndpointTypeInterface {
+				return 0
+			}
+			n := r.subnets
+			if n == 0 {
+				n = 1
+			}
+			return cost.USD(n) * a.Pricing.InterfaceEndpointMonth()
 		},
 		DeleteBatch: func(ctx context.Context, rs []orphanVPCEndpoint) error {
 			ids := make([]string, 0, len(rs))

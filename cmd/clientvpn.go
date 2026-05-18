@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/pincher95/cor/pkg/cost"
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
@@ -113,6 +114,9 @@ func (a *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.Global
 				ClientVpnEndpointId: aws.String(r.id),
 			})
 			return err
+		},
+		MonthlyCost: func(r orphanClientVPN) cost.USD {
+			return a.Pricing.ClientVPNEndpointMonth()
 		},
 	})
 }
