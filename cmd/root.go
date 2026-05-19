@@ -44,6 +44,9 @@ type AWSCommand struct {
 	Prompter    prompter.Client
 	Output      io.Writer
 	Pricing     *cost.Pricing
+	// CEActuals holds month-to-date actual costs from AWS Cost Explorer when
+	// --with-ce is set. Snapshot/AMI rows prorate against these totals.
+	CEActuals *cost.CEActuals
 	// SharedSink, when non-nil, causes the pipeline to write rows into a
 	// single cross-region table instead of building its own per-region sink.
 	// Set by runAcrossRegions; nil for single-region runs.
@@ -51,12 +54,19 @@ type AWSCommand struct {
 }
 
 // SharedSink is a lazy-once container for a thread-safe RowSink used by
-// --all-regions to unify per-region output into a single table.
+// --all-regions to unify per-region output into a single table. It also
+// accumulates a cross-region cost total emitted as one footer row at the
+// end via FinalizeTotals.
 type SharedSink struct {
 	once   sync.Once
 	sink   printer.RowSink
 	format string
 	out    io.Writer
+
+	mu      sync.Mutex
+	headers []string
+	count   int64
+	total   cost.USD
 }
 
 // NewSharedSink constructs an empty SharedSink. The first pipeline call
@@ -70,8 +80,41 @@ func NewSharedSink(format string, out io.Writer) *SharedSink {
 func (s *SharedSink) Get(index bool, headers []string) printer.RowSink {
 	s.once.Do(func() {
 		s.sink = printer.NewConcurrentSink(printer.NewSink(s.format, s.out, index, headers))
+		s.mu.Lock()
+		s.headers = headers
+		s.mu.Unlock()
 	})
 	return s.sink
+}
+
+// AddCost accumulates one row's cost into the cross-region grand total.
+// Called by each per-region pipeline as it writes rows to the shared sink.
+func (s *SharedSink) AddCost(c cost.USD) {
+	s.mu.Lock()
+	s.count++
+	s.total += c
+	s.mu.Unlock()
+}
+
+// FinalizeTotals writes one footer row with the cross-region cost total.
+// No-op if no rows were ever written.
+func (s *SharedSink) FinalizeTotals() {
+	s.mu.Lock()
+	sink := s.sink
+	headers := s.headers
+	count := s.count
+	total := s.total
+	s.mu.Unlock()
+	if sink == nil || len(headers) == 0 || count == 0 {
+		return
+	}
+	footer := make([]any, len(headers))
+	footer[0] = fmt.Sprintf("Total (%d)", count)
+	for i := 1; i < len(footer)-1; i++ {
+		footer[i] = ""
+	}
+	footer[len(footer)-1] = total
+	sink.WriteRow(footer...)
 }
 
 // Close finalizes the wrapped sink. Safe to call when no pipeline has written
@@ -168,6 +211,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("all-regions", false, "Scan every enabled region for the current account.")
 	rootCmd.PersistentFlags().String("save-baseline", "", "Write a JSON snapshot of this run's orphans+costs to this path.")
 	rootCmd.PersistentFlags().String("diff-baseline", "", "Read a prior --save-baseline snapshot and emit a delta (added / removed / changed).")
+	rootCmd.PersistentFlags().Bool("with-ce", false, "Fetch actual month-to-date snapshot/AMI cost from Cost Explorer and use it to prorate per-row estimates. Each call costs $0.01.")
 
 	// imagesCmd.PersistentFlags().String("creation-date", "", "The time when the image was created, in the ISO 8601 format in the UTC time zone (YYYY-MM-DDThh:mm:ss.sssZ), for example, 2021-09-29T11:04:43.305Z . You can use a wildcard ( * ), for example, 2021-09-29T* , which matches an entire day")
 

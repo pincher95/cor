@@ -26,6 +26,24 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// ceConsumers names the subcommands whose MonthlyCost callbacks actually
+// consult CEActuals. Other commands skip the (paid) CE round-trip even
+// when --with-ce is set.
+var ceConsumers = map[string]bool{
+	"snapshots": true,
+	"images":    true,
+	"rds":       true,
+}
+
+// globalServices names subcommands whose AWS API is account-global —
+// listing returns the same resources regardless of which region the call
+// is made from. With --all-regions we run them once instead of N times to
+// avoid N× duplicate rows.
+var globalServices = map[string]bool{
+	"s3buckets":    true,
+	"route53zones": true,
+}
+
 // CommandSetup declares per-command variation for runResourceCommand.
 // AdditionalFlags lists flags specific to this subcommand (global flags are
 // always included). BuildClients constructs the minimal AWSClientImpl the
@@ -86,7 +104,16 @@ func runResourceCommand(
 	}
 	awsCmd := newAWSCommandWithFormat(client, cloudConfig, cmd.InOrStdin(), cmd.OutOrStdout(), globals.LogFormat)
 
-	if !globals.AllRegions {
+	if globals.WithCE && ceConsumers[cmd.Name()] {
+		act, ceErr := cost.FetchCEActuals(ctx, *cfg)
+		if ceErr != nil {
+			awsCmd.Logger.LogError("--with-ce: failed to fetch Cost Explorer actuals; falling back to estimates", ceErr, nil)
+		} else {
+			awsCmd.CEActuals = act
+		}
+	}
+
+	if !globals.AllRegions || globalServices[cmd.Name()] {
 		return execute(awsCmd, ctx, globals, extras)
 	}
 
@@ -141,9 +168,13 @@ func runAcrossRegions(
 
 	// One sink across all regions — rows from every region land in a single
 	// unified table. Lazily constructed on the first per-region write so the
-	// header reflects the actual decorated columns (Region + cost).
+	// header reflects the actual decorated columns (Region + cost). After
+	// all regions complete, we emit one grand-total footer before Close.
 	shared := NewSharedSink(globals.Format, cmd.OutOrStdout())
-	defer shared.Close()
+	defer func() {
+		shared.FinalizeTotals()
+		shared.Close()
+	}()
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelism)
@@ -165,6 +196,7 @@ func runAcrossRegions(
 			}
 			regional := newAWSCommandWithFormat(client, regionalCloudCfg, cmd.InOrStdin(), cmd.OutOrStdout(), globals.LogFormat)
 			regional.SharedSink = shared
+			regional.CEActuals = awsCmd.CEActuals
 			if err := execute(regional, gctx, globals, extras); err != nil {
 				awsCmd.Logger.LogError("multi-region: command failed", err, map[string]any{"region": region})
 			}

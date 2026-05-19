@@ -46,6 +46,7 @@ type GlobalFlags struct {
 	AllRegions   bool
 	SaveBaseline string
 	DiffBaseline string
+	WithCE       bool
 }
 
 // FlagRetriever defines an interface for retrieving flags.
@@ -208,6 +209,9 @@ func GetFlags(flagRetriever FlagRetriever, additionalFlags []Flag) (*GlobalFlags
 		return nil, nil, err
 	}
 	if globals.DiffBaseline, err = getString("diff-baseline"); err != nil {
+		return nil, nil, err
+	}
+	if globals.WithCE, err = getBool("with-ce"); err != nil {
 		return nil, nil, err
 	}
 

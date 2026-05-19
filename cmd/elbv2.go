@@ -181,11 +181,14 @@ func (a *AWSCommand) executeElbv2(ctx context.Context, globals *flags.GlobalFlag
 			return err
 		},
 		MonthlyCost: func(r orphanLBv2) cost.USD {
+			hours := cost.USD(cost.HoursPerMonth)
 			switch r.lbType {
 			case types.LoadBalancerTypeEnumApplication, types.LoadBalancerTypeEnumNetwork:
-				return cost.USD(cost.HoursPerMonth) * a.Pricing.ALBHour()
+				// Base hourly + ~1 LCU/hr floor for health checks. Real
+				// traffic adds more LCU but orphans hit the floor only.
+				return hours*a.Pricing.ALBHour() + hours*a.Pricing.ALBLCUHour()
 			case types.LoadBalancerTypeEnumGateway:
-				return cost.USD(cost.HoursPerMonth) * a.Pricing.GatewayLBHour()
+				return hours * a.Pricing.GatewayLBHour()
 			}
 			return 0
 		},

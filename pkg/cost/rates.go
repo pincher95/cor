@@ -18,21 +18,24 @@ type rateTable struct {
 	EBSSnapshot USD            // $/GB-month
 	ElasticIP   USD            // $/month per unassociated EIP
 
-	NATGatewayHour    USD // $/hour idle
-	NATGatewayDataGB  USD // $/GB processed
-	ALBHour           USD // application/network load balancer $/hour
-	GatewayLBHour     USD
-	ClassicELBMonth   USD // bundled monthly figure ($18.25-ish)
-	RDSManualSnapGB   USD // $/GB-month
-	RDSInstanceMonth  map[string]USD
-	CloudWatchLogsGB  USD // $/GB-month stored
-	EFSStandardGB     USD
-	EFSInfrequentGB   USD
-	ECRGB             USD
-	Route53ZoneMonth  USD
-	InterfaceEndpoint USD // $/AZ-month (idle); data not modeled
-	ClientVPNEndpoint USD // $/month per endpoint
-	SiteToSiteVPN     USD // $/month per connection
+	NATGatewayHour      USD // $/hour idle
+	NATGatewayDataGB    USD // $/GB processed
+	ALBHour             USD // application/network load balancer $/hour
+	ALBLCUHour          USD // $/LCU-hour — applies on top of base hour
+	GatewayLBHour       USD
+	ClassicELBMonth     USD // bundled monthly figure ($18.25-ish)
+	RDSManualSnapGB     USD // $/GB-month
+	RDSInstanceMonth    map[string]USD
+	CloudWatchLogsGB    USD // $/GB-month stored
+	EFSStandardGB       USD
+	EFSInfrequentGB     USD
+	EFSArchiveGB        USD
+	ECRGB               USD
+	OpenSearchStorageGB USD
+	Route53ZoneMonth    USD
+	InterfaceEndpoint   USD // $/AZ-month (idle); data not modeled
+	ClientVPNEndpoint   USD // $/month per endpoint
+	SiteToSiteVPN       USD // $/month per connection
 
 	LambdaPCGBSecond  USD // provisioned concurrency $/GB-second
 	ElastiCacheNode   map[string]USD
@@ -61,27 +64,30 @@ func usEast1Rates() *rateTable {
 			"sc1":      0.015,
 			"standard": 0.05,
 		},
-		EBSSnapshot:       0.05,
-		ElasticIP:         3.65,
-		NATGatewayHour:    0.045,
-		NATGatewayDataGB:  0.045,
-		ALBHour:           0.0225,
-		GatewayLBHour:     0.0125,
-		ClassicELBMonth:   18.25,
-		RDSManualSnapGB:   0.095,
-		CloudWatchLogsGB:  0.03,
-		EFSStandardGB:     0.30,
-		EFSInfrequentGB:   0.016,
-		ECRGB:             0.10,
-		Route53ZoneMonth:  0.50,
-		InterfaceEndpoint: 7.30,
-		ClientVPNEndpoint: 73.00,
-		SiteToSiteVPN:     36.50,
-		LambdaPCGBSecond:  0.0000041667,
-		DynamoDBWCUHour:   0.00065,
-		DynamoDBRCUHour:   0.00013,
-		DynamoDBStorageGB: 0.25,
-		S3StandardGB:      0.023,
+		EBSSnapshot:         0.05,
+		ElasticIP:           3.65,
+		NATGatewayHour:      0.045,
+		NATGatewayDataGB:    0.045,
+		ALBHour:             0.0225,
+		ALBLCUHour:          0.008,
+		GatewayLBHour:       0.0125,
+		ClassicELBMonth:     18.25,
+		RDSManualSnapGB:     0.095,
+		CloudWatchLogsGB:    0.03,
+		EFSStandardGB:       0.30,
+		EFSInfrequentGB:     0.0125,
+		EFSArchiveGB:        0.045,
+		ECRGB:               0.10,
+		OpenSearchStorageGB: 0.122,
+		Route53ZoneMonth:    0.50,
+		InterfaceEndpoint:   7.30,
+		ClientVPNEndpoint:   73.00,
+		SiteToSiteVPN:       36.50,
+		LambdaPCGBSecond:    0.0000041667,
+		DynamoDBWCUHour:     0.00065,
+		DynamoDBRCUHour:     0.00013,
+		DynamoDBStorageGB:   0.25,
+		S3StandardGB:        0.023,
 		RDSInstanceMonth: map[string]USD{
 			"db.t3.micro":  12.41,
 			"db.t3.small":  24.82,

@@ -82,8 +82,11 @@ func TestExecuteRDS_MultiProducerMerges(t *testing.T) {
 	if strings.Contains(got, "inst-running") {
 		t.Errorf("should not include running instances:\n%s", got)
 	}
-	if calls.Count("DescribeDBInstances") != 1 {
-		t.Errorf("expected 1 DescribeDBInstances, got %d", calls.Count("DescribeDBInstances"))
+	// DescribeDBInstances is called twice: once in PreScan to compute the
+	// snapshot free-tier allowance (sum of allocated storage on running DBs),
+	// once in the producer to list stopped instances.
+	if calls.Count("DescribeDBInstances") != 2 {
+		t.Errorf("expected 2 DescribeDBInstances (PreScan + producer), got %d", calls.Count("DescribeDBInstances"))
 	}
 	if calls.Count("DescribeDBSnapshots") != 1 {
 		t.Errorf("expected 1 DescribeDBSnapshots, got %d", calls.Count("DescribeDBSnapshots"))

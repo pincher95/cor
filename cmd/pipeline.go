@@ -225,6 +225,9 @@ func runOrphanPipeline[Item, Result any](
 		for r := range resultChan {
 			stream.WriteRow(toRow(r)...)
 			collected = append(collected, r)
+			if usingSharedSink && spec.MonthlyCost != nil {
+				a.SharedSink.AddCost(spec.MonthlyCost(r))
+			}
 		}
 		if usingSharedSink {
 			return
@@ -473,6 +476,9 @@ func renderCostFiltered[Item, Result any](
 	}
 	for _, r := range collected {
 		stream.WriteRow(outToRow(r)...)
+		if usingSharedSink && spec.MonthlyCost != nil {
+			a.SharedSink.AddCost(spec.MonthlyCost(r))
+		}
 	}
 	if usingSharedSink {
 		return

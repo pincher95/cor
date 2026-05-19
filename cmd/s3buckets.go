@@ -18,8 +18,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/pincher95/cor/pkg/cost"
@@ -184,24 +187,27 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 
 	isEmpty := listOutput.KeyCount == nil || *listOutput.KeyCount == 0
 
-	// Check for incomplete multipart uploads
-	mpuOutput, err := regionalS3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+	// Count incomplete multipart uploads. Paginate — a single ListMultipart-
+	// Uploads call caps at 1000 and buckets like archivers can have far more.
+	incompleteUploads := 0
+	mpuPager := s3.NewListMultipartUploadsPaginator(regionalS3Client, &s3.ListMultipartUploadsInput{
 		Bucket: bucket.Name,
 	})
-	if err != nil {
-		return nil, err
+	for mpuPager.HasMorePages() {
+		page, err := mpuPager.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		incompleteUploads += len(page.Uploads)
 	}
 
-	incompleteUploads := len(mpuOutput.Uploads)
-
-	// Check lifecycle policy if requested
-	hasLifecycle := false
-	if checkLifecycle {
-		_, err := regionalS3Client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
-			Bucket: bucket.Name,
-		})
-		hasLifecycle = err == nil
-	}
+	// Lifecycle is always queried so the "Has Lifecycle" column is honest.
+	// --check-lifecycle only controls whether absence of a policy promotes
+	// the bucket to an orphan; the column itself is informational.
+	_, lcErr := regionalS3Client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
+		Bucket: bucket.Name,
+	})
+	hasLifecycle := lcErr == nil
 
 	// Determine if orphaned
 	isOrphan := isEmpty || incompleteUploads > 0 || (checkLifecycle && !hasLifecycle && !isEmpty)
@@ -226,6 +232,11 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 		reason = "No lifecycle policy"
 	}
 
+	// Best-effort size lookup from CloudWatch BucketSizeBytes. Free of
+	// charge, daily granularity. Errors here are non-fatal — fall back to
+	// zero (renders as "—" in the cost column).
+	sizeBytes, _ := a.s3BucketSizeBytes(ctx, bucketName, region)
+
 	return &orphanS3Bucket{
 		BucketName:         bucketName,
 		Region:             region,
@@ -233,8 +244,51 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 		IsEmpty:            isEmpty,
 		IncompleteUploads:  incompleteUploads,
 		HasLifecyclePolicy: hasLifecycle,
+		SizeBytes:          sizeBytes,
 		Reason:             reason,
 	}, nil
+}
+
+// s3BucketSizeBytes returns the bucket's "StandardStorage" size in bytes from
+// the CloudWatch AWS/S3 BucketSizeBytes metric (daily granularity, 3-day
+// lookback window). Free, no S3 LIST calls required. Returns 0 with no error
+// when the metric has no datapoints (newly-created or fully-archived buckets).
+func (a *AWSCommand) s3BucketSizeBytes(ctx context.Context, bucketName, region string) (int64, error) {
+	regionalConfig := &handlers.CloudConfig{
+		AuthMethod: a.CloudConfig.AuthMethod,
+		Profile:    a.CloudConfig.Profile,
+		Region:     aws.String(region),
+	}
+	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
+	if err != nil {
+		return 0, err
+	}
+	cw := cloudwatch.NewFromConfig(*cfg)
+
+	end := time.Now()
+	start := end.Add(-3 * 24 * time.Hour)
+	out, err := cw.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("AWS/S3"),
+		MetricName: aws.String("BucketSizeBytes"),
+		Dimensions: []cwtypes.Dimension{
+			{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
+			{Name: aws.String("StorageType"), Value: aws.String("StandardStorage")},
+		},
+		StartTime:  &start,
+		EndTime:    &end,
+		Period:     aws.Int32(86400),
+		Statistics: []cwtypes.Statistic{cwtypes.StatisticAverage},
+	})
+	if err != nil {
+		return 0, err
+	}
+	var latest int64
+	for _, dp := range out.Datapoints {
+		if dp.Average != nil && int64(*dp.Average) > latest {
+			latest = int64(*dp.Average)
+		}
+	}
+	return latest, nil
 }
 
 func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName string, region string) error {

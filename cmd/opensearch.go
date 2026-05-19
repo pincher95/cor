@@ -143,9 +143,7 @@ func (a *AWSCommand) executeOpenSearch(ctx context.Context, globals *flags.Globa
 		},
 		MonthlyCost: func(r orphanOpenSearchDomain) cost.USD {
 			nodes := cost.USD(r.InstanceCount) * a.Pricing.OpenSearchNodeMonth(r.InstanceType)
-			// 0.135/GB-month is an industry-standard EBS rate for OpenSearch storage;
-			// captured under EBSVolume["gp3"] which is close enough.
-			storage := cost.USD(float64(r.StorageSize)) * a.Pricing.EBSVolumeGB("gp3")
+			storage := cost.USD(float64(r.StorageSize)) * a.Pricing.OpenSearchStorageGB()
 			return nodes + storage
 		},
 	})

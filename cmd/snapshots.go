@@ -70,6 +70,18 @@ func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalF
 	// snapshotsKeep is populated when --keep-latest-per-volume > 0 and lists
 	// the snapshot IDs to KEEP per source volume; everything else is an orphan.
 	snapshotsKeep := map[string]bool{}
+	// totalSelfSnapshotGB is the unfiltered allocated-GB denominator for
+	// --with-ce proration. Populated in PreScan via a separate full-account
+	// pass; can't reuse the producer because --filter-by-name narrows it.
+	var totalSelfSnapshotGB int64
+
+	costOf := func(r orphanSnapshot) cost.USD {
+		fallback := cost.USD(float64(r.size)) * a.Pricing.EBSSnapshotGB() * 0.5
+		if a.CEActuals == nil || a.CEActuals.EBSSnapshotUSD == 0 {
+			return fallback
+		}
+		return cost.Prorate(a.CEActuals.EBSSnapshotUSD, float64(r.size), float64(totalSelfSnapshotGB), fallback)
+	}
 
 	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[types.Snapshot, orphanSnapshot]{
 		Headers:       []string{"Name", "Snapshot ID", "Size"},
@@ -100,6 +112,15 @@ func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalF
 				usedByVolumes = m
 				return nil
 			})
+			if a.CEActuals != nil {
+				g.Go(func() error {
+					total, err := sumSelfSnapshotAllocatedGB(gctx, a.AWSClient.EC2)
+					if err == nil {
+						totalSelfSnapshotGB = total
+					}
+					return err
+				})
+			}
 			return g.Wait()
 		},
 		List: func(ctx context.Context, emit func(types.Snapshot) error) error {
@@ -155,11 +176,17 @@ func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalF
 			return []any{r.name, r.id, r.size}
 		},
 		Finalize: func(rs []orphanSnapshot) []any {
-			var total int32
+			var totalGB int32
+			var totalCost cost.USD
 			for _, r := range rs {
-				total += r.size
+				totalGB += r.size
+				totalCost += costOf(r)
 			}
-			return []any{"Total", "", total}
+			label := "Total (snapshots are incremental — upper bound)"
+			if a.CEActuals != nil && a.CEActuals.EBSSnapshotUSD > 0 {
+				label = "Total (prorated from Cost Explorer)"
+			}
+			return []any{label, "", totalGB, totalCost}
 		},
 		Delete: func(ctx context.Context, r orphanSnapshot) error {
 			a.Logger.LogInfo("Deleting Snapshot", map[string]any{"SnapshotID": r.id, "Name": r.name})
@@ -168,9 +195,7 @@ func (a *AWSCommand) executeSnapShot(ctx context.Context, globals *flags.GlobalF
 		},
 		DeleteConcurrency: 5,
 		DedupKey:          func(r orphanSnapshot) string { return r.id },
-		MonthlyCost: func(r orphanSnapshot) cost.USD {
-			return cost.USD(float64(r.size)) * a.Pricing.EBSSnapshotGB()
-		},
+		MonthlyCost:       costOf,
 	})
 }
 
@@ -251,6 +276,32 @@ func (a *AWSCommand) collectSnapshotsUsedByImages(ctx context.Context) (map[stri
 	}
 
 	return used, nil
+}
+
+// sumSelfSnapshotAllocatedGB paginates every owner-self snapshot in the
+// region and returns the total allocated GB. Used as the proration
+// denominator under --with-ce — a full-account total because the producer
+// may apply --filter-by-name and can't be reused.
+func sumSelfSnapshotAllocatedGB(ctx context.Context, ec2c ec2DescribeSnapshotsAPI) (int64, error) {
+	var total int64
+	p := ec2.NewDescribeSnapshotsPaginator(ec2c, &ec2.DescribeSnapshotsInput{
+		OwnerIds: []string{"self"},
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return 0, err
+		}
+		for _, snap := range page.Snapshots {
+			total += int64(aws.ToInt32(snap.VolumeSize))
+		}
+	}
+	return total, nil
+}
+
+// ec2DescribeSnapshotsAPI is the minimum interface ec2.NewDescribeSnapshotsPaginator needs.
+type ec2DescribeSnapshotsAPI interface {
+	DescribeSnapshots(ctx context.Context, params *ec2.DescribeSnapshotsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSnapshotsOutput, error)
 }
 
 func (a *AWSCommand) collectSnapshotsUsedByVolumes(ctx context.Context) (map[string]bool, error) {

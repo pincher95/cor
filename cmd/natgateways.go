@@ -17,8 +17,11 @@ package cmd
 
 import (
 	"context"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/pincher95/cor/pkg/cost"
@@ -38,7 +41,10 @@ var natgatewaysCmd = &cobra.Command{
 				{Name: "filter-by-state", Type: "string"},
 			},
 			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
-				return &handlers.AWSClientImpl{EC2: ec2.NewFromConfig(*cfg)}
+				return &handlers.AWSClientImpl{
+					EC2:        ec2.NewFromConfig(*cfg),
+					CloudWatch: cloudwatch.NewFromConfig(*cfg),
+				}
 			},
 		}, (*AWSCommand).executeNatGateways)
 	},
@@ -49,12 +55,13 @@ func init() {
 }
 
 type orphanNatGateway struct {
-	name    string
-	id      string
-	state   string
-	vpcID   string
-	subnet  string
-	created string
+	name          string
+	id            string
+	state         string
+	vpcID         string
+	subnet        string
+	created       string
+	bytesOutMonth int64
 }
 
 func (a *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
@@ -85,18 +92,21 @@ func (a *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.Glob
 			}
 			return nil
 		},
-		Process: func(_ context.Context, ng types.NatGateway) (*orphanNatGateway, error) {
+		Process: func(ctx context.Context, ng types.NatGateway) (*orphanNatGateway, error) {
 			name := ec2NameTag(ng.Tags)
 			if name == "" {
 				name = "-"
 			}
+			natID := aws.ToString(ng.NatGatewayId)
+			bytesOut, _ := a.natBytesOutLast30d(ctx, natID)
 			return &orphanNatGateway{
-				name:    name,
-				id:      aws.ToString(ng.NatGatewayId),
-				state:   string(ng.State),
-				vpcID:   aws.ToString(ng.VpcId),
-				subnet:  aws.ToString(ng.SubnetId),
-				created: ng.CreateTime.String(),
+				name:          name,
+				id:            natID,
+				state:         string(ng.State),
+				vpcID:         aws.ToString(ng.VpcId),
+				subnet:        aws.ToString(ng.SubnetId),
+				created:       ng.CreateTime.String(),
+				bytesOutMonth: bytesOut,
 			}, nil
 		},
 		ToRow: func(r orphanNatGateway) []any {
@@ -108,7 +118,43 @@ func (a *AWSCommand) executeNatGateways(ctx context.Context, globals *flags.Glob
 			return err
 		},
 		MonthlyCost: func(r orphanNatGateway) cost.USD {
-			return cost.USD(cost.HoursPerMonth) * a.Pricing.NATGatewayHour()
+			idle := cost.USD(cost.HoursPerMonth) * a.Pricing.NATGatewayHour()
+			dataGB := float64(r.bytesOutMonth) / (1024 * 1024 * 1024)
+			return idle + cost.USD(dataGB)*a.Pricing.NATGatewayDataGB()
 		},
 	})
+}
+
+// natBytesOutLast30d returns total bytes processed (outbound + return) over
+// the last 30 days from CloudWatch AWS/NATGateway metrics. Idle NATs return
+// 0; an unreachable/missing-metric NAT also returns 0 with no error.
+func (a *AWSCommand) natBytesOutLast30d(ctx context.Context, natID string) (int64, error) {
+	if a.AWSClient.CloudWatch == nil || natID == "" {
+		return 0, nil
+	}
+	end := time.Now()
+	start := end.Add(-30 * 24 * time.Hour)
+	dims := []cwtypes.Dimension{{Name: aws.String("NatGatewayId"), Value: aws.String(natID)}}
+
+	var total int64
+	for _, metric := range []string{"BytesOutToDestination", "BytesOutToSource"} {
+		out, err := a.AWSClient.CloudWatch.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+			Namespace:  aws.String("AWS/NATGateway"),
+			MetricName: aws.String(metric),
+			Dimensions: dims,
+			StartTime:  &start,
+			EndTime:    &end,
+			Period:     aws.Int32(86400),
+			Statistics: []cwtypes.Statistic{cwtypes.StatisticSum},
+		})
+		if err != nil {
+			return 0, err
+		}
+		for _, dp := range out.Datapoints {
+			if dp.Sum != nil {
+				total += int64(*dp.Sum)
+			}
+		}
+	}
+	return total, nil
 }

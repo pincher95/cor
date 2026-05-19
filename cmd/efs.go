@@ -29,11 +29,14 @@ import (
 )
 
 type orphanEFS struct {
-	name         string
-	id           string
-	mountTargets int32
-	sizeBytes    int64
-	state        string
+	name          string
+	id            string
+	mountTargets  int32
+	sizeBytes     int64
+	bytesStandard int64
+	bytesIA       int64
+	bytesArchive  int64
+	state         string
 }
 
 var efsCmd = &cobra.Command{
@@ -100,19 +103,26 @@ func (a *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags,
 				return nil, nil
 			}
 			sizeBytes := int64(0)
+			var stdB, iaB, arcB int64
 			if fs.SizeInBytes != nil {
 				sizeBytes = fs.SizeInBytes.Value
+				stdB = aws.ToInt64(fs.SizeInBytes.ValueInStandard)
+				iaB = aws.ToInt64(fs.SizeInBytes.ValueInIA)
+				arcB = aws.ToInt64(fs.SizeInBytes.ValueInArchive)
 			}
 			state := string(fs.LifeCycleState)
 			if state == "" {
 				state = string(efstypes.LifeCycleStateAvailable)
 			}
 			return &orphanEFS{
-				name:         name,
-				id:           aws.ToString(fs.FileSystemId),
-				mountTargets: mtCount,
-				sizeBytes:    sizeBytes,
-				state:        state,
+				name:          name,
+				id:            aws.ToString(fs.FileSystemId),
+				mountTargets:  mtCount,
+				sizeBytes:     sizeBytes,
+				bytesStandard: stdB,
+				bytesIA:       iaB,
+				bytesArchive:  arcB,
+				state:         state,
 			}, nil
 		},
 		ToRow: func(r orphanEFS) []any {
@@ -124,8 +134,17 @@ func (a *AWSCommand) executeEFS(ctx context.Context, globals *flags.GlobalFlags,
 			return err
 		},
 		MonthlyCost: func(r orphanEFS) cost.USD {
-			gb := float64(r.sizeBytes) / (1024 * 1024 * 1024)
-			return cost.USD(gb) * a.Pricing.EFSStandardGB()
+			const gib = 1024 * 1024 * 1024
+			std := float64(r.bytesStandard) / gib
+			ia := float64(r.bytesIA) / gib
+			arc := float64(r.bytesArchive) / gib
+			// Older API responses omit the tier breakdown; bill the unsplit total at Standard.
+			if std == 0 && ia == 0 && arc == 0 {
+				return cost.USD(float64(r.sizeBytes)/gib) * a.Pricing.EFSStandardGB()
+			}
+			return cost.USD(std)*a.Pricing.EFSStandardGB() +
+				cost.USD(ia)*a.Pricing.EFSInfrequentGB() +
+				cost.USD(arc)*a.Pricing.EFSArchiveGB()
 		},
 	})
 }

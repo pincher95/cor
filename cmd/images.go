@@ -103,6 +103,7 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 	usedByLaunchTemplates := make(map[string]*imageUsage, 1024)
 	snapshotSizes := make(map[string]int32, 1024)
 	var instMu, ltMu, sizesMu sync.Mutex
+	var totalSelfSnapshotGB int64
 
 	headers := []string{"ami name", "ami id", "creation date", "snapshot ids"}
 	if includeUsedByInstance && !includeUsedByLaunchTemplate {
@@ -131,6 +132,7 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 				})
 			})
 			g.Go(func() error {
+				var total int64
 				p := ec2.NewDescribeSnapshotsPaginator(a.AWSClient.EC2, &ec2.DescribeSnapshotsInput{
 					OwnerIds: []string{"self"},
 				})
@@ -141,10 +143,13 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 					}
 					sizesMu.Lock()
 					for _, s := range page.Snapshots {
-						snapshotSizes[aws.ToString(s.SnapshotId)] = aws.ToInt32(s.VolumeSize)
+						sz := aws.ToInt32(s.VolumeSize)
+						snapshotSizes[aws.ToString(s.SnapshotId)] = sz
+						total += int64(sz)
 					}
 					sizesMu.Unlock()
 				}
+				totalSelfSnapshotGB = total
 				return nil
 			})
 			return g.Wait()
@@ -247,7 +252,11 @@ func (a *AWSCommand) executeImages(ctx context.Context, globals *flags.GlobalFla
 			for _, sid := range r.snapshotIDs {
 				gb += float64(snapshotSizes[sid])
 			}
-			return cost.USD(gb) * a.Pricing.EBSSnapshotGB()
+			fallback := cost.USD(gb) * a.Pricing.EBSSnapshotGB() * 0.5
+			if a.CEActuals == nil || a.CEActuals.EBSSnapshotUSD == 0 {
+				return fallback
+			}
+			return cost.Prorate(a.CEActuals.EBSSnapshotUSD, gb, float64(totalSelfSnapshotGB), fallback)
 		},
 	})
 }

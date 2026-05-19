@@ -29,10 +29,11 @@ import (
 )
 
 type orphanClientVPN struct {
-	id          string
-	description string
-	status      string
-	activeConns int
+	id                string
+	description       string
+	status            string
+	activeConns       int
+	associatedSubnets int
 }
 
 var clientVPNCmd = &cobra.Command{
@@ -62,7 +63,7 @@ func (a *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.Global
 	includeActive := (*extras)["include-active"].(bool)
 
 	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[ec2types.ClientVpnEndpoint, orphanClientVPN]{
-		Headers:       []string{"Endpoint ID", "Description", "Status", "ActiveConnections"},
+		Headers:       []string{"Endpoint ID", "Description", "Status", "ActiveConnections", "AssocSubnets"},
 		ResourceLabel: "Client VPN endpoints",
 		List: func(ctx context.Context, emit func(ec2types.ClientVpnEndpoint) error) error {
 			p := ec2.NewDescribeClientVpnEndpointsPaginator(a.AWSClient.EC2, &ec2.DescribeClientVpnEndpointsInput{})
@@ -84,26 +85,32 @@ func (a *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.Global
 			if !matchesFilterValue(desc, filterByName) {
 				return nil, nil
 			}
-			activeCount, err := a.countActiveClientVPNConnections(ctx, aws.ToString(ep.ClientVpnEndpointId))
+			id := aws.ToString(ep.ClientVpnEndpointId)
+			activeCount, err := a.countActiveClientVPNConnections(ctx, id)
 			if err != nil {
 				return nil, err
 			}
 			if !includeActive && activeCount > 0 {
 				return nil, nil
 			}
+			subnetCount, err := a.countClientVPNAssociatedSubnets(ctx, id)
+			if err != nil {
+				return nil, err
+			}
 			status := "-"
 			if ep.Status != nil {
 				status = string(ep.Status.Code)
 			}
 			return &orphanClientVPN{
-				id:          aws.ToString(ep.ClientVpnEndpointId),
-				description: desc,
-				status:      status,
-				activeConns: activeCount,
+				id:                id,
+				description:       desc,
+				status:            status,
+				activeConns:       activeCount,
+				associatedSubnets: subnetCount,
 			}, nil
 		},
 		ToRow: func(r orphanClientVPN) []any {
-			return []any{r.id, r.description, r.status, r.activeConns}
+			return []any{r.id, r.description, r.status, r.activeConns, r.associatedSubnets}
 		},
 		Delete: func(ctx context.Context, r orphanClientVPN) error {
 			if r.activeConns > 0 {
@@ -116,9 +123,37 @@ func (a *AWSCommand) executeClientVPN(ctx context.Context, globals *flags.Global
 			return err
 		},
 		MonthlyCost: func(r orphanClientVPN) cost.USD {
-			return a.Pricing.ClientVPNEndpointMonth()
+			// Billed per associated subnet, not per endpoint.
+			return cost.USD(r.associatedSubnets) * a.Pricing.ClientVPNEndpointMonth()
 		},
 	})
+}
+
+// countClientVPNAssociatedSubnets returns the number of subnets associated
+// with the endpoint. Client VPN bills per associated subnet, so an endpoint
+// with zero associations is genuinely free.
+func (a *AWSCommand) countClientVPNAssociatedSubnets(ctx context.Context, endpointID string) (int, error) {
+	if endpointID == "" {
+		return 0, nil
+	}
+	p := ec2.NewDescribeClientVpnTargetNetworksPaginator(a.AWSClient.EC2, &ec2.DescribeClientVpnTargetNetworksInput{
+		ClientVpnEndpointId: aws.String(endpointID),
+		MaxResults:          aws.Int32(20),
+	})
+	count := 0
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return 0, err
+		}
+		for _, n := range page.ClientVpnTargetNetworks {
+			// Only "associated" status counts as billable.
+			if n.Status != nil && n.Status.Code == ec2types.AssociationStatusCodeAssociated {
+				count++
+			}
+		}
+	}
+	return count, nil
 }
 
 func (a *AWSCommand) countActiveClientVPNConnections(ctx context.Context, endpointID string) (int, error) {

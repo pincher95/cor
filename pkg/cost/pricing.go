@@ -55,6 +55,10 @@ func (p *Pricing) NATGatewayDataGB() USD { return p.rates.NATGatewayDataGB }
 // ALBHour returns $/hour for application/network load balancers.
 func (p *Pricing) ALBHour() USD { return p.rates.ALBHour }
 
+// ALBLCUHour returns $/LCU-hour. Idle ALBs accumulate ~1 LCU/hr from
+// minimum target health checks even with no real traffic.
+func (p *Pricing) ALBLCUHour() USD { return p.rates.ALBLCUHour }
+
 // GatewayLBHour returns $/hour for gateway load balancers.
 func (p *Pricing) GatewayLBHour() USD { return p.rates.GatewayLBHour }
 
@@ -78,6 +82,14 @@ func (p *Pricing) EFSStandardGB() USD { return p.rates.EFSStandardGB }
 
 // EFSInfrequentGB returns $/GB-month for EFS Infrequent Access storage.
 func (p *Pricing) EFSInfrequentGB() USD { return p.rates.EFSInfrequentGB }
+
+// EFSArchiveGB returns $/GB-month for EFS Archive (lifecycle-only) storage.
+func (p *Pricing) EFSArchiveGB() USD { return p.rates.EFSArchiveGB }
+
+// OpenSearchStorageGB returns $/GB-month for OpenSearch managed storage
+// (separate SKU from standalone EBS gp3 — OpenSearch's managed-service
+// markup brings the rate to ~$0.122 in us-east-1).
+func (p *Pricing) OpenSearchStorageGB() USD { return p.rates.OpenSearchStorageGB }
 
 // ECRGB returns $/GB-month for container image storage.
 func (p *Pricing) ECRGB() USD { return p.rates.ECRGB }
