@@ -134,6 +134,17 @@ func (p *Pricing) DynamoDBStorageGB() USD { return p.rates.DynamoDBStorageGB }
 // S3StandardGB returns $/GB-month for S3 Standard storage.
 func (p *Pricing) S3StandardGB() USD { return p.rates.S3StandardGB }
 
+// S3StorageGB returns $/GB-month for the given CloudWatch StorageType
+// (StandardStorage, StandardIAStorage, IntelligentTieringIAStorage,
+// GlacierStorage, ...). Unknown classes return 0 — preferable to
+// guessing a wrong rate.
+func (p *Pricing) S3StorageGB(class string) USD {
+	if v, ok := p.rates.S3StorageGB[class]; ok {
+		return v
+	}
+	return 0
+}
+
 // PriceEntry is one row of the embedded rate table for display.
 type PriceEntry struct {
 	SKU  string

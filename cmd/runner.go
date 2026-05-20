@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -171,6 +172,9 @@ func runAcrossRegions(
 	// header reflects the actual decorated columns (Region + cost). After
 	// all regions complete, we emit one grand-total footer before Close.
 	shared := NewSharedSink(globals.Format, cmd.OutOrStdout())
+	if globals.SortBy != "" {
+		shared.SetSort(globals.SortBy, globals.SortDesc)
+	}
 	defer func() {
 		shared.FinalizeTotals()
 		shared.Close()
@@ -207,12 +211,14 @@ func runAcrossRegions(
 }
 
 // newAWSCommandWithFormat builds an AWSCommand with the given log format,
-// stdin/stdout, and pre-built service clients.
+// stdin/stdout, and pre-built service clients. Logs go to stderr so they
+// don't interleave the table on stdout — this lets users redirect the
+// table cleanly (`cor … > out.txt`) while still seeing progress.
 func newAWSCommandWithFormat(client *handlers.AWSClientImpl, cloudConfig *handlers.CloudConfig, in io.Reader, out io.Writer, logFormat string) *AWSCommand {
 	return &AWSCommand{
 		AWSClient:   *client,
 		CloudConfig: cloudConfig,
-		Logger:      logging.NewLoggerWithFormat(logFormat, out),
+		Logger:      logging.NewLoggerWithFormat(logFormat, os.Stderr),
 		Prompter:    prompter.NewConsolePrompter(in, out),
 		Output:      out,
 		Pricing:     cost.New(aws.ToString(cloudConfig.Region)),

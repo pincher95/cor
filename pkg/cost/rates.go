@@ -44,6 +44,11 @@ type rateTable struct {
 	DynamoDBRCUHour   USD
 	DynamoDBStorageGB USD
 	S3StandardGB      USD
+	// S3StorageGB is keyed by CloudWatch's StorageType dimension value
+	// (StandardStorage, StandardIAStorage, IntelligentTieringFAStorage,
+	// GlacierStorage, ...) so the call site can look up rates directly
+	// from the dimension it queried.
+	S3StorageGB map[string]USD
 }
 
 // defaultRates ships in code so cor works offline. Phase G adds a refresh
@@ -88,6 +93,20 @@ func usEast1Rates() *rateTable {
 		DynamoDBRCUHour:     0.00013,
 		DynamoDBStorageGB:   0.25,
 		S3StandardGB:        0.023,
+		S3StorageGB: map[string]USD{
+			"StandardStorage":                0.023,
+			"StandardIAStorage":              0.0125,
+			"OneZoneIAStorage":               0.01,
+			"ReducedRedundancyStorage":       0.024,
+			"IntelligentTieringFAStorage":    0.023,
+			"IntelligentTieringIAStorage":    0.0125,
+			"IntelligentTieringAAStorage":    0.0036,
+			"IntelligentTieringAIAStorage":   0.004,
+			"IntelligentTieringDAAStorage":   0.00099,
+			"GlacierInstantRetrievalStorage": 0.004,
+			"GlacierStorage":                 0.0036,
+			"DeepArchiveStorage":             0.00099,
+		},
 		RDSInstanceMonth: map[string]USD{
 			"db.t3.micro":  12.41,
 			"db.t3.small":  24.82,

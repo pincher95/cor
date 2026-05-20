@@ -63,6 +63,13 @@ type SharedSink struct {
 	format string
 	out    io.Writer
 
+	// sortCol/sortDesc capture the cross-region sort intent. Set by the
+	// runner before the first pipeline runs; applied to the wrapped sink
+	// at lazy-construction time so the entire --all-regions table is
+	// sorted globally (rather than per-region-then-concatenated).
+	sortCol  string
+	sortDesc bool
+
 	mu      sync.Mutex
 	headers []string
 	count   int64
@@ -75,11 +82,21 @@ func NewSharedSink(format string, out io.Writer) *SharedSink {
 	return &SharedSink{format: format, out: out}
 }
 
+// SetSort records the sort column/direction for the unified table. Must
+// be called before the first Get for the sort to take effect.
+func (s *SharedSink) SetSort(col string, desc bool) {
+	s.sortCol = col
+	s.sortDesc = desc
+}
+
 // Get returns (constructing on first call) the wrapped sink. Concurrent
 // callers share one sink; writes are mutex-serialized.
 func (s *SharedSink) Get(index bool, headers []string) printer.RowSink {
 	s.once.Do(func() {
 		s.sink = printer.NewConcurrentSink(printer.NewSink(s.format, s.out, index, headers))
+		if s.sortCol != "" {
+			s.sink.SetSort(resolveSortKey(s.sortCol), s.sortDesc)
+		}
 		s.mu.Lock()
 		s.headers = headers
 		s.mu.Unlock()

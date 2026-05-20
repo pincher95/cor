@@ -38,8 +38,20 @@ type orphanS3Bucket struct {
 	IsEmpty            bool
 	IncompleteUploads  int
 	HasLifecyclePolicy bool
-	SizeBytes          int64
-	Reason             string
+	// SizeByClass holds bytes-per-storage-class as reported by CloudWatch.
+	// Cost is computed per class because IT / IA / Glacier rates differ
+	// from Standard by up to 23×.
+	SizeByClass map[string]int64
+	Reason      string
+}
+
+// totalBytes returns the sum of bytes across all storage classes.
+func (o *orphanS3Bucket) totalBytes() int64 {
+	var t int64
+	for _, b := range o.SizeByClass {
+		t += b
+	}
+	return t
 }
 
 // s3bucketsCmd represents the s3buckets command
@@ -62,6 +74,7 @@ empty buckets and incomplete uploads for efficiency.`,
 		return runResourceCommand(cmd, CommandSetup{
 			AdditionalFlags: []flags.Flag{
 				{Name: "check-lifecycle", Type: "bool"},
+				{Name: "include-zero-cost", Type: "bool"},
 			},
 			BuildClients: func(cfg *aws.Config) *handlers.AWSClientImpl {
 				return &handlers.AWSClientImpl{S3: s3.NewFromConfig(*cfg)}
@@ -72,10 +85,12 @@ empty buckets and incomplete uploads for efficiency.`,
 
 func init() {
 	s3bucketsCmd.Flags().Bool("check-lifecycle", false, "Also flag buckets without lifecycle policies")
+	s3bucketsCmd.Flags().Bool("include-zero-cost", false, "Include buckets with $0 estimated monthly cost (empty, no size). Hidden by default to reduce noise.")
 }
 
 func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	checkLifecycle := (*extras)["check-lifecycle"].(bool)
+	includeZeroCost := (*extras)["include-zero-cost"].(bool)
 
 	return runOrphanPipeline(a, ctx, globals, extras, OrphanPipeline[s3types.Bucket, orphanS3Bucket]{
 		Headers:       []string{"Bucket Name", "Region", "Created", "Empty", "Incomplete Uploads", "Has Lifecycle", "Reason"},
@@ -99,6 +114,9 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.Global
 				a.Logger.LogError("Error checking S3 bucket", err, map[string]any{
 					"bucket": aws.ToString(b.Name),
 				})
+				return nil, nil
+			}
+			if orphan != nil && !includeZeroCost && orphan.totalBytes() <= 0 {
 				return nil, nil
 			}
 			return orphan, nil
@@ -139,11 +157,15 @@ func (a *AWSCommand) executeS3Buckets(ctx context.Context, globals *flags.Global
 			return nil
 		},
 		MonthlyCost: func(r orphanS3Bucket) cost.USD {
-			if r.SizeBytes <= 0 {
-				return 0
+			var total cost.USD
+			for class, bytes := range r.SizeByClass {
+				if bytes <= 0 {
+					continue
+				}
+				gb := float64(bytes) / (1024 * 1024 * 1024)
+				total += cost.USD(gb) * a.Pricing.S3StorageGB(class)
 			}
-			gb := float64(r.SizeBytes) / (1024 * 1024 * 1024)
-			return cost.USD(gb) * a.Pricing.S3StandardGB()
+			return total
 		},
 	})
 }
@@ -204,13 +226,31 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 	// Lifecycle is always queried so the "Has Lifecycle" column is honest.
 	// --check-lifecycle only controls whether absence of a policy promotes
 	// the bucket to an orphan; the column itself is informational.
-	_, lcErr := regionalS3Client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
+	lcOut, lcErr := regionalS3Client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
 		Bucket: bucket.Name,
 	})
 	hasLifecycle := lcErr == nil
+	// abortsMPU is true when any Enabled rule with an empty-prefix filter
+	// has AbortIncompleteMultipartUpload set — meaning S3 will sweep
+	// dangling uploads automatically, so there is nothing for cor to flag.
+	abortsMPU := false
+	if hasLifecycle {
+		for _, rule := range lcOut.Rules {
+			if rule.Status != s3types.ExpirationStatusEnabled || rule.AbortIncompleteMultipartUpload == nil {
+				continue
+			}
+			if lifecycleRuleCoversAllKeys(rule) {
+				abortsMPU = true
+				break
+			}
+		}
+	}
 
-	// Determine if orphaned
-	isOrphan := isEmpty || incompleteUploads > 0 || (checkLifecycle && !hasLifecycle && !isEmpty)
+	// Determine if orphaned. Buckets whose multipart uploads are already
+	// being aborted by lifecycle don't need cor's attention — the cost is
+	// being managed by AWS on a schedule.
+	mpuActionable := incompleteUploads > 0 && !abortsMPU
+	isOrphan := isEmpty || mpuActionable || (checkLifecycle && !hasLifecycle && !isEmpty)
 
 	if !isOrphan {
 		return nil, nil
@@ -222,20 +262,21 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 	}
 
 	reason := ""
-	if isEmpty && incompleteUploads > 0 {
+	switch {
+	case isEmpty && incompleteUploads > 0:
 		reason = fmt.Sprintf("Empty with %d incomplete uploads", incompleteUploads)
-	} else if isEmpty {
+	case isEmpty:
 		reason = "Empty bucket"
-	} else if incompleteUploads > 0 {
-		reason = fmt.Sprintf("%d incomplete multipart uploads", incompleteUploads)
-	} else if checkLifecycle && !hasLifecycle {
+	case mpuActionable:
+		reason = fmt.Sprintf("%d incomplete multipart uploads (no abort lifecycle)", incompleteUploads)
+	case checkLifecycle && !hasLifecycle:
 		reason = "No lifecycle policy"
 	}
 
-	// Best-effort size lookup from CloudWatch BucketSizeBytes. Free of
-	// charge, daily granularity. Errors here are non-fatal — fall back to
-	// zero (renders as "—" in the cost column).
-	sizeBytes, _ := a.s3BucketSizeBytes(ctx, bucketName, region)
+	// Best-effort size lookup from CloudWatch BucketSizeBytes across every
+	// storage class. Free of charge, daily granularity. Errors are non-
+	// fatal — missing data renders as "—" in the cost column.
+	sizeByClass, _ := a.s3SizeByClass(ctx, bucketName, region)
 
 	return &orphanS3Bucket{
 		BucketName:         bucketName,
@@ -244,16 +285,57 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 		IsEmpty:            isEmpty,
 		IncompleteUploads:  incompleteUploads,
 		HasLifecyclePolicy: hasLifecycle,
-		SizeBytes:          sizeBytes,
+		SizeByClass:        sizeByClass,
 		Reason:             reason,
 	}, nil
 }
 
-// s3BucketSizeBytes returns the bucket's "StandardStorage" size in bytes from
-// the CloudWatch AWS/S3 BucketSizeBytes metric (daily granularity, 3-day
-// lookback window). Free, no S3 LIST calls required. Returns 0 with no error
-// when the metric has no datapoints (newly-created or fully-archived buckets).
-func (a *AWSCommand) s3BucketSizeBytes(ctx context.Context, bucketName, region string) (int64, error) {
+// lifecycleRuleCoversAllKeys returns true when the rule's filter selects
+// every object in the bucket — either no filter at all or an empty prefix.
+// Rules with a non-empty prefix or tag filter only catch a subset of keys
+// and are not enough to guarantee bucket-wide MPU cleanup.
+func lifecycleRuleCoversAllKeys(rule s3types.LifecycleRule) bool {
+	if rule.Filter == nil {
+		return true
+	}
+	f := rule.Filter
+	if f.Prefix != nil && aws.ToString(f.Prefix) != "" {
+		return false
+	}
+	if f.Tag != nil || f.ObjectSizeGreaterThan != nil || f.ObjectSizeLessThan != nil {
+		return false
+	}
+	if f.And != nil {
+		if aws.ToString(f.And.Prefix) != "" || len(f.And.Tags) > 0 ||
+			f.And.ObjectSizeGreaterThan != nil || f.And.ObjectSizeLessThan != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// s3StorageClasses lists every CloudWatch StorageType dimension value that
+// BucketSizeBytes emits. Kept in sync with pkg/cost rate keys.
+var s3StorageClasses = []string{
+	"StandardStorage",
+	"StandardIAStorage",
+	"OneZoneIAStorage",
+	"ReducedRedundancyStorage",
+	"IntelligentTieringFAStorage",
+	"IntelligentTieringIAStorage",
+	"IntelligentTieringAAStorage",
+	"IntelligentTieringAIAStorage",
+	"IntelligentTieringDAAStorage",
+	"GlacierInstantRetrievalStorage",
+	"GlacierStorage",
+	"DeepArchiveStorage",
+}
+
+// s3SizeByClass returns bytes-per-storage-class for the bucket using one
+// GetMetricData call covering every CloudWatch StorageType dimension cor
+// knows about (3-day lookback, daily granularity). Free, no S3 LIST.
+// Classes with no datapoints are omitted from the result.
+func (a *AWSCommand) s3SizeByClass(ctx context.Context, bucketName, region string) (map[string]int64, error) {
 	regionalConfig := &handlers.CloudConfig{
 		AuthMethod: a.CloudConfig.AuthMethod,
 		Profile:    a.CloudConfig.Profile,
@@ -261,34 +343,57 @@ func (a *AWSCommand) s3BucketSizeBytes(ctx context.Context, bucketName, region s
 	}
 	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	cw := cloudwatch.NewFromConfig(*cfg)
 
 	end := time.Now()
 	start := end.Add(-3 * 24 * time.Hour)
-	out, err := cw.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/S3"),
-		MetricName: aws.String("BucketSizeBytes"),
-		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
-			{Name: aws.String("StorageType"), Value: aws.String("StandardStorage")},
-		},
-		StartTime:  &start,
-		EndTime:    &end,
-		Period:     aws.Int32(86400),
-		Statistics: []cwtypes.Statistic{cwtypes.StatisticAverage},
+	queries := make([]cwtypes.MetricDataQuery, 0, len(s3StorageClasses))
+	for i, class := range s3StorageClasses {
+		queries = append(queries, cwtypes.MetricDataQuery{
+			Id: aws.String(fmt.Sprintf("c%d", i)),
+			MetricStat: &cwtypes.MetricStat{
+				Metric: &cwtypes.Metric{
+					Namespace:  aws.String("AWS/S3"),
+					MetricName: aws.String("BucketSizeBytes"),
+					Dimensions: []cwtypes.Dimension{
+						{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
+						{Name: aws.String("StorageType"), Value: aws.String(class)},
+					},
+				},
+				Period: aws.Int32(86400),
+				Stat:   aws.String("Average"),
+			},
+			ReturnData: aws.Bool(true),
+		})
+	}
+
+	out, err := cw.GetMetricData(ctx, &cloudwatch.GetMetricDataInput{
+		StartTime:         &start,
+		EndTime:           &end,
+		MetricDataQueries: queries,
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var latest int64
-	for _, dp := range out.Datapoints {
-		if dp.Average != nil && int64(*dp.Average) > latest {
-			latest = int64(*dp.Average)
+
+	sizes := make(map[string]int64, len(out.MetricDataResults))
+	for _, r := range out.MetricDataResults {
+		if r.Id == nil || len(r.Values) == 0 {
+			continue
+		}
+		var i int
+		if _, err := fmt.Sscanf(*r.Id, "c%d", &i); err != nil || i < 0 || i >= len(s3StorageClasses) {
+			continue
+		}
+		// MetricDataResult.Values is newest-first by default — take the latest.
+		latest := int64(r.Values[0])
+		if latest > 0 {
+			sizes[s3StorageClasses[i]] = latest
 		}
 	}
-	return latest, nil
+	return sizes, nil
 }
 
 func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName string, region string) error {
