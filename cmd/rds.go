@@ -79,9 +79,7 @@ type rdsResource struct {
 func (a *AWSCommand) executeRDS(ctx context.Context, globals *flags.GlobalFlags, extras *map[string]any) error {
 	includeInstances := (*extras)["include-instances"].(bool)
 	includeSnapshots := (*extras)["include-snapshots"].(bool)
-	// Default both on when neither flag is set. Keep this local — extras
-	// is shared across regional goroutines under --all-regions and writing
-	// to it races with sibling regions.
+	// extras is shared across regional goroutines under --all-regions; mutating it races.
 	if !includeInstances && !includeSnapshots {
 		includeInstances = true
 		includeSnapshots = true

@@ -173,7 +173,7 @@ func runAcrossRegions(
 	// all regions complete, we emit one grand-total footer before Close.
 	shared := NewSharedSink(globals.Format, cmd.OutOrStdout())
 	if globals.SortBy != "" {
-		shared.SetSort(globals.SortBy, globals.SortDesc)
+		shared.SetSort(resolveSortKey(globals.SortBy), globals.SortDesc)
 	}
 	defer func() {
 		shared.FinalizeTotals()

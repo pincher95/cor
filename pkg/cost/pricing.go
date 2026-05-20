@@ -145,6 +145,18 @@ func (p *Pricing) S3StorageGB(class string) USD {
 	return 0
 }
 
+// S3StorageClasses returns the sorted list of CloudWatch StorageType
+// dimension values cor prices. Single source of truth for callers that
+// need to fan out BucketSizeBytes queries.
+func (p *Pricing) S3StorageClasses() []string {
+	classes := make([]string, 0, len(p.rates.S3StorageGB))
+	for c := range p.rates.S3StorageGB {
+		classes = append(classes, c)
+	}
+	sort.Strings(classes)
+	return classes
+}
+
 // PriceEntry is one row of the embedded rate table for display.
 type PriceEntry struct {
 	SKU  string

@@ -29,6 +29,7 @@ import (
 	handlers "github.com/pincher95/cor/pkg/handlers/aws"
 	"github.com/pincher95/cor/pkg/handlers/flags"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 type orphanS3Bucket struct {
@@ -45,7 +46,6 @@ type orphanS3Bucket struct {
 	Reason      string
 }
 
-// totalBytes returns the sum of bytes across all storage classes.
 func (o *orphanS3Bucket) totalBytes() int64 {
 	var t int64
 	for _, b := range o.SizeByClass {
@@ -186,49 +186,58 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 		region = "us-east-1" // Default for no constraint
 	}
 
-	// Create a region-specific S3 client for this bucket
-	regionalConfig := &handlers.CloudConfig{
-		AuthMethod: a.CloudConfig.AuthMethod,
-		Profile:    a.CloudConfig.Profile,
-		Region:     aws.String(region),
-	}
-	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
+	cfg, err := a.regionalConfig(ctx, region)
 	if err != nil {
 		return nil, err
 	}
 	regionalS3Client := s3.NewFromConfig(*cfg)
 
 	// Check if bucket is empty (list first object only for efficiency)
-	listOutput, err := regionalS3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:  bucket.Name,
-		MaxKeys: aws.Int32(1),
+	var (
+		isEmpty           bool
+		incompleteUploads int
+		lcOut             *s3.GetBucketLifecycleConfigurationOutput
+		lcErr             error
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		out, err := regionalS3Client.ListObjectsV2(gctx, &s3.ListObjectsV2Input{
+			Bucket:  bucket.Name,
+			MaxKeys: aws.Int32(1),
+		})
+		if err != nil {
+			return err
+		}
+		isEmpty = out.KeyCount == nil || *out.KeyCount == 0
+		return nil
 	})
-	if err != nil {
+	g.Go(func() error {
+		// Paginate — one ListMultipartUploads caps at 1000; archiver buckets blow past that.
+		mpuPager := s3.NewListMultipartUploadsPaginator(regionalS3Client, &s3.ListMultipartUploadsInput{
+			Bucket: bucket.Name,
+		})
+		for mpuPager.HasMorePages() {
+			page, err := mpuPager.NextPage(gctx)
+			if err != nil {
+				return err
+			}
+			incompleteUploads += len(page.Uploads)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		// Lifecycle is always queried so "Has Lifecycle" is honest;
+		// --check-lifecycle only controls whether absence promotes to orphan.
+		// NoSuchLifecycleConfiguration is the normal "no policy" response —
+		// captured into lcErr, not returned.
+		lcOut, lcErr = regionalS3Client.GetBucketLifecycleConfiguration(gctx, &s3.GetBucketLifecycleConfigurationInput{
+			Bucket: bucket.Name,
+		})
+		return nil
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-
-	isEmpty := listOutput.KeyCount == nil || *listOutput.KeyCount == 0
-
-	// Count incomplete multipart uploads. Paginate — a single ListMultipart-
-	// Uploads call caps at 1000 and buckets like archivers can have far more.
-	incompleteUploads := 0
-	mpuPager := s3.NewListMultipartUploadsPaginator(regionalS3Client, &s3.ListMultipartUploadsInput{
-		Bucket: bucket.Name,
-	})
-	for mpuPager.HasMorePages() {
-		page, err := mpuPager.NextPage(ctx)
-		if err != nil {
-			return nil, err
-		}
-		incompleteUploads += len(page.Uploads)
-	}
-
-	// Lifecycle is always queried so the "Has Lifecycle" column is honest.
-	// --check-lifecycle only controls whether absence of a policy promotes
-	// the bucket to an orphan; the column itself is informational.
-	lcOut, lcErr := regionalS3Client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
-		Bucket: bucket.Name,
-	})
 	hasLifecycle := lcErr == nil
 	// abortsMPU is true when any Enabled rule with an empty-prefix filter
 	// has AbortIncompleteMultipartUpload set — meaning S3 will sweep
@@ -246,9 +255,7 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 		}
 	}
 
-	// Determine if orphaned. Buckets whose multipart uploads are already
-	// being aborted by lifecycle don't need cor's attention — the cost is
-	// being managed by AWS on a schedule.
+	// Lifecycle already sweeping these — nothing for cor to flag.
 	mpuActionable := incompleteUploads > 0 && !abortsMPU
 	isOrphan := isEmpty || mpuActionable || (checkLifecycle && !hasLifecycle && !isEmpty)
 
@@ -290,16 +297,16 @@ func (a *AWSCommand) checkS3BucketOrphan(ctx context.Context, bucket s3types.Buc
 	}, nil
 }
 
-// lifecycleRuleCoversAllKeys returns true when the rule's filter selects
-// every object in the bucket — either no filter at all or an empty prefix.
-// Rules with a non-empty prefix or tag filter only catch a subset of keys
-// and are not enough to guarantee bucket-wide MPU cleanup.
+// lifecycleRuleCoversAllKeys returns true when the rule selects every
+// object in the bucket. Tag or size predicates, non-empty prefixes, and
+// legacy top-level Prefix all narrow the rule to a subset and disqualify.
 func lifecycleRuleCoversAllKeys(rule s3types.LifecycleRule) bool {
+	// Pre-Filter API rules carry the prefix on the rule itself.
 	if rule.Filter == nil {
-		return true
+		return aws.ToString(rule.Prefix) == "" //nolint:staticcheck // legacy field required for correctness
 	}
 	f := rule.Filter
-	if f.Prefix != nil && aws.ToString(f.Prefix) != "" {
+	if aws.ToString(f.Prefix) != "" {
 		return false
 	}
 	if f.Tag != nil || f.ObjectSizeGreaterThan != nil || f.ObjectSizeLessThan != nil {
@@ -314,45 +321,27 @@ func lifecycleRuleCoversAllKeys(rule s3types.LifecycleRule) bool {
 	return true
 }
 
-// s3StorageClasses lists every CloudWatch StorageType dimension value that
-// BucketSizeBytes emits. Kept in sync with pkg/cost rate keys.
-var s3StorageClasses = []string{
-	"StandardStorage",
-	"StandardIAStorage",
-	"OneZoneIAStorage",
-	"ReducedRedundancyStorage",
-	"IntelligentTieringFAStorage",
-	"IntelligentTieringIAStorage",
-	"IntelligentTieringAAStorage",
-	"IntelligentTieringAIAStorage",
-	"IntelligentTieringDAAStorage",
-	"GlacierInstantRetrievalStorage",
-	"GlacierStorage",
-	"DeepArchiveStorage",
-}
-
 // s3SizeByClass returns bytes-per-storage-class for the bucket using one
 // GetMetricData call covering every CloudWatch StorageType dimension cor
 // knows about (3-day lookback, daily granularity). Free, no S3 LIST.
 // Classes with no datapoints are omitted from the result.
 func (a *AWSCommand) s3SizeByClass(ctx context.Context, bucketName, region string) (map[string]int64, error) {
-	regionalConfig := &handlers.CloudConfig{
-		AuthMethod: a.CloudConfig.AuthMethod,
-		Profile:    a.CloudConfig.Profile,
-		Region:     aws.String(region),
-	}
-	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
+	cfg, err := a.regionalConfig(ctx, region)
 	if err != nil {
 		return nil, err
 	}
 	cw := cloudwatch.NewFromConfig(*cfg)
 
+	classes := a.Pricing.S3StorageClasses()
 	end := time.Now()
 	start := end.Add(-3 * 24 * time.Hour)
-	queries := make([]cwtypes.MetricDataQuery, 0, len(s3StorageClasses))
-	for i, class := range s3StorageClasses {
+	queries := make([]cwtypes.MetricDataQuery, 0, len(classes))
+	idToClass := make(map[string]string, len(classes))
+	for i, class := range classes {
+		id := fmt.Sprintf("c%d", i)
+		idToClass[id] = class
 		queries = append(queries, cwtypes.MetricDataQuery{
-			Id: aws.String(fmt.Sprintf("c%d", i)),
+			Id: aws.String(id),
 			MetricStat: &cwtypes.MetricStat{
 				Metric: &cwtypes.Metric{
 					Namespace:  aws.String("AWS/S3"),
@@ -380,30 +369,32 @@ func (a *AWSCommand) s3SizeByClass(ctx context.Context, bucketName, region strin
 
 	sizes := make(map[string]int64, len(out.MetricDataResults))
 	for _, r := range out.MetricDataResults {
-		if r.Id == nil || len(r.Values) == 0 {
+		class, ok := idToClass[aws.ToString(r.Id)]
+		if !ok || len(r.Values) == 0 {
 			continue
 		}
-		var i int
-		if _, err := fmt.Sscanf(*r.Id, "c%d", &i); err != nil || i < 0 || i >= len(s3StorageClasses) {
-			continue
-		}
-		// MetricDataResult.Values is newest-first by default — take the latest.
-		latest := int64(r.Values[0])
-		if latest > 0 {
-			sizes[s3StorageClasses[i]] = latest
+		// MetricDataResult.Values is newest-first (ScanByTimestampDescending default).
+		if v := int64(r.Values[0]); v > 0 {
+			sizes[class] = v
 		}
 	}
 	return sizes, nil
 }
 
-func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName string, region string) error {
-	// Create a region-specific S3 client
-	regionalConfig := &handlers.CloudConfig{
+// regionalConfig builds an aws.Config for the given bucket region, reusing
+// the command's credentials/profile. Each call resolves credentials; if
+// this becomes hot, add a per-region cache.
+func (a *AWSCommand) regionalConfig(ctx context.Context, region string) (*aws.Config, error) {
+	cc := &handlers.CloudConfig{
 		AuthMethod: a.CloudConfig.AuthMethod,
 		Profile:    a.CloudConfig.Profile,
 		Region:     aws.String(region),
 	}
-	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
+	return handlers.NewConfig(ctx, *cc, "UTC", true, true)
+}
+
+func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName string, region string) error {
+	cfg, err := a.regionalConfig(ctx, region)
 	if err != nil {
 		return err
 	}
@@ -431,13 +422,7 @@ func (a *AWSCommand) abortMultipartUploads(ctx context.Context, bucketName strin
 }
 
 func (a *AWSCommand) deleteS3Bucket(ctx context.Context, bucketName string, region string) error {
-	// Create a region-specific S3 client
-	regionalConfig := &handlers.CloudConfig{
-		AuthMethod: a.CloudConfig.AuthMethod,
-		Profile:    a.CloudConfig.Profile,
-		Region:     aws.String(region),
-	}
-	cfg, err := handlers.NewConfig(ctx, *regionalConfig, "UTC", true, true)
+	cfg, err := a.regionalConfig(ctx, region)
 	if err != nil {
 		return err
 	}
