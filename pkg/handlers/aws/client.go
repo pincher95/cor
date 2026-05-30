@@ -30,6 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	"github.com/aws/aws-sdk-go-v2/service/bedrock"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -66,6 +67,7 @@ type AWSClientImpl struct {
 	DynamoDB    *dynamodb.Client
 	S3          *s3.Client
 	ECS         *ecs.Client
+	Bedrock     *bedrock.Client
 }
 
 // CloudConfig is the configuration for the AWS client

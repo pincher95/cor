@@ -195,6 +195,8 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(dynamodbCmd)
 	rootCmd.AddCommand(s3bucketsCmd)
 	rootCmd.AddCommand(ecsCmd)
+	rootCmd.AddCommand(ec2Cmd)
+	rootCmd.AddCommand(bedrockCmd)
 }
 
 func init() {

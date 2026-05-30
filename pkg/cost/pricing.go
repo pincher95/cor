@@ -20,8 +20,14 @@ type Pricing struct {
 	rates  *rateTable
 }
 
-// New returns a Pricing for the given region.
+// New returns a Pricing for the given region. Tries the on-disk cache
+// (~/.cor/prices/<region>.json) first; falls back to bundled defaults if
+// the cache is missing or corrupted. Populate the cache via `cor pricing
+// refresh --region <region>`.
 func New(region string) *Pricing {
+	if rt, _, err := LoadCache(region); err == nil && rt != nil {
+		return &Pricing{region: region, rates: rt}
+	}
 	r := defaultRates[region]
 	if r == nil {
 		r = defaultRates["us-east-1"]
@@ -133,6 +139,58 @@ func (p *Pricing) DynamoDBStorageGB() USD { return p.rates.DynamoDBStorageGB }
 
 // S3StandardGB returns $/GB-month for S3 Standard storage.
 func (p *Pricing) S3StandardGB() USD { return p.rates.S3StandardGB }
+
+// EC2InstanceMonth returns $/month for the given instance type, or 0 if
+// the type isn't in our table (renders as "—").
+func (p *Pricing) EC2InstanceMonth(instanceType string) USD {
+	return p.rates.EC2InstanceMonth[instanceType]
+}
+
+// BedrockProvisionedMUHour returns $/hour per provisioned model unit for
+// the given model ARN/ID. Matches by the first substring key that the
+// model identifier contains; unknown models return 0.
+func (p *Pricing) BedrockProvisionedMUHour(modelID string) USD {
+	for k, v := range p.rates.BedrockMUHour {
+		if k != "" && containsFold(modelID, k) {
+			return v
+		}
+	}
+	return 0
+}
+
+// containsFold is a case-insensitive substring check. We don't import
+// strings here to keep the package import surface minimal.
+func containsFold(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	hl := len(haystack)
+	nl := len(needle)
+	for i := 0; i+nl <= hl; i++ {
+		match := true
+		for j := range nl {
+			a := haystack[i+j]
+			b := needle[j]
+			if a >= 'A' && a <= 'Z' {
+				a += 32
+			}
+			if b >= 'A' && b <= 'Z' {
+				b += 32
+			}
+			if a != b {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
 
 // S3StorageGB returns $/GB-month for the given CloudWatch StorageType
 // (StandardStorage, StandardIAStorage, IntelligentTieringIAStorage,

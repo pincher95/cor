@@ -44,6 +44,8 @@ type rateTable struct {
 	DynamoDBRCUHour   USD
 	DynamoDBStorageGB USD
 	S3StandardGB      USD
+	EC2InstanceMonth  map[string]USD // $/month per instance type
+	BedrockMUHour     map[string]USD // $/hour per provisioned model unit, by model id substring
 	// S3StorageGB is keyed by CloudWatch's StorageType dimension value
 	// (StandardStorage, StandardIAStorage, IntelligentTieringFAStorage,
 	// GlacierStorage, ...) so the call site can look up rates directly
@@ -130,6 +132,40 @@ func usEast1Rates() *rateTable {
 			"m5.large.search":  102.20,
 			"r5.large.search":  131.40,
 			"r6g.large.search": 101.18,
+		},
+		EC2InstanceMonth: map[string]USD{
+			"t3.micro":   7.59,
+			"t3.small":   15.18,
+			"t3.medium":  30.37,
+			"t3.large":   60.74,
+			"t3.xlarge":  121.47,
+			"t3.2xlarge": 242.94,
+			"m5.large":   70.08,
+			"m5.xlarge":  140.16,
+			"m5.2xlarge": 280.32,
+			"m5.4xlarge": 560.64,
+			"m5.8xlarge": 1121.28,
+			"c5.large":   62.05,
+			"c5.xlarge":  124.10,
+			"c5.2xlarge": 248.20,
+			"c5.4xlarge": 496.40,
+			"r5.large":   91.98,
+			"r5.xlarge":  183.96,
+			"r5.2xlarge": 367.92,
+			"r5.4xlarge": 735.84,
+		},
+		// Coarse rate per provisioned model unit (no-commit term). Real
+		// price depends on commitment term; users running 1-mo / 6-mo
+		// commits should expect ~30-50% lower. Keyed by ARN substring.
+		BedrockMUHour: map[string]USD{
+			"claude-3-haiku":    5.0,
+			"claude-3-5-haiku":  6.5,
+			"claude-3-sonnet":   25.0,
+			"claude-3-5-sonnet": 29.0,
+			"claude-3-opus":     80.0,
+			"titan-text":        4.0,
+			"titan-embed":       0.8,
+			"llama":             8.0,
 		},
 	}
 }
