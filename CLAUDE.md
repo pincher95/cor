@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-COR (Cloud Orphan Resources) is a Go CLI that discovers — and optionally deletes — orphaned AWS resources across ~29 resource types (EBS, AMIs, ELB v1/v2, ASG, NAT, RDS, Lambda, S3, IAM roles/policies, etc.). Built on Cobra + Viper + AWS SDK Go v2. Go **1.26.2**.
+COR (Cloud Orphan Resources) is a Go CLI that discovers — and optionally deletes — orphaned AWS resources across ~29 resource types (EBS, AMIs, ELB v1/v2, ASG, NAT, RDS, Lambda, S3, IAM roles/policies, etc.). Built on Cobra + Viper + AWS SDK Go v2. Go **1.26.3**.
 
 `iamroles` / `iampolicies` are the first **security-hygiene** commands: they set no `MonthlyCost` (IAM entities are free) and are account-global, so they're registered in the `globalServices` map in `cmd/runner.go` to run once under `--all-regions`. Any new account-global command (IAM, Route53, S3) must be added there too.
 

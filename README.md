@@ -31,6 +31,8 @@ COR currently supports:
 - **DynamoDB Tables**: tables with zero read/write activity, empty tables (`dynamodb`)
 - **S3 Buckets**: empty buckets, incomplete multipart uploads (`s3buckets`)
 - **ECS Clusters**: clusters with no services or running tasks (`ecs`)
+- **EC2 Instances**: instances stopped for too long, or running with near-zero CPU (`ec2`)
+- **Bedrock**: idle provisioned-throughput model units (`bedrock`)
 - **IAM Roles**: customer-managed roles unused for 90+ days, excluding AWS service-linked roles (`iamroles`)
 - **IAM Policies**: customer-managed policies attached to no principal and used as no permissions boundary (`iampolicies`)
 
@@ -129,6 +131,12 @@ Example env vars:
 - `--metrics-file <path>`: append a per-run JSON metrics summary to this path
 - `--timeout`: overall command timeout (e.g. `5m`)
 - `--config`: config file path (default: `$HOME/.cor.yaml`)
+- `--all-regions`: scan every enabled region for the account (one unified table)
+- `--min-cost <usd>`: only show orphans estimated at or above this monthly cost
+- `--top-n <n>`: show only the N most expensive orphans
+- `--rank`: add a Rank column ordered by estimated monthly cost
+- `--save-baseline <path>` / `--diff-baseline <path>`: snapshot orphans+costs, then diff a later run
+- `--with-ce`: prorate snapshot/AMI/RDS estimates against actual Cost Explorer spend (**$0.01 per call**)
 
 ### Examples
 
@@ -267,6 +275,42 @@ Example env vars:
 
 ```bash
 ./cor ecs
+```
+
+**Cost analysis (`cost` / `pricing`):**
+
+Every orphan command shows an estimated monthly cost per row. Two extra commands
+work on the cost dimension itself:
+
+```bash
+# total estimated monthly cost of every orphan type, in one table
+./cor cost
+./cor cost --all-regions
+
+# rank the most expensive orphans of one type
+./cor snapshots --rank --top-n 20
+./cor volumes --min-cost 25
+
+# inspect the rate table in effect (bundled defaults, or a refreshed cache)
+./cor pricing show
+./cor pricing show eu-west-1
+
+# fetch live prices from the AWS Pricing API into ~/.cor/prices/<region>.json
+./cor pricing refresh
+./cor pricing refresh --all-regions
+```
+
+Estimates use bundled **us-east-1 list prices** (no Reserved Instance or Savings
+Plan discounts). A region without a refreshed cache silently falls back to
+us-east-1 rates, so run `cor pricing refresh` for accurate non-us-east-1 numbers.
+A cost of `—` means the rate is unknown, not that the resource is free.
+
+**Track cost drift between runs:**
+
+```bash
+./cor volumes --save-baseline /tmp/volumes-week1.ndjson
+# ... a week later
+./cor volumes --diff-baseline /tmp/volumes-week1.ndjson   # added / removed / changed
 ```
 
 **IAM hygiene (security, not cost):**
