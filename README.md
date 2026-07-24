@@ -31,6 +31,8 @@ COR currently supports:
 - **DynamoDB Tables**: tables with zero read/write activity, empty tables (`dynamodb`)
 - **S3 Buckets**: empty buckets, incomplete multipart uploads (`s3buckets`)
 - **ECS Clusters**: clusters with no services or running tasks (`ecs`)
+- **IAM Roles**: customer-managed roles unused for 90+ days, excluding AWS service-linked roles (`iamroles`)
+- **IAM Policies**: customer-managed policies attached to no principal and used as no permissions boundary (`iampolicies`)
 
 ### Cost Impact
 
@@ -58,6 +60,7 @@ COR helps identify resources that continue to incur AWS charges even when orphan
 - **DynamoDB Tables**: Provisioned mode $0.00065/hour per WCU, $0.00013/hour per RCU; storage $0.25/GB-month
 - **S3 Buckets**: Storage $0.023/GB-month (Standard); request costs; incomplete uploads consume storage
 - **ECS Clusters**: Free, but prevents cleanup of NAT Gateway, ALB, and related infrastructure
+- **IAM Roles / Policies**: No direct charge — cleanup reduces attack surface and reclaims account entity quotas (default 1,000 roles / 1,500 customer-managed policies)
 
 *Note: Prices are approximate and vary by region. Check current AWS pricing for your region.*
 
@@ -264,6 +267,57 @@ Example env vars:
 
 ```bash
 ./cor ecs
+```
+
+**IAM hygiene (security, not cost):**
+
+`iamroles` and `iampolicies` are account-global (they run once even with
+`--all-regions`) and have no `Est $/mo` column — they exist to shrink attack
+surface and reclaim IAM entity quotas. Always audit first; IAM deletion is
+irreversible.
+
+```bash
+# unused roles > 180 days, audit only (JSON for review)
+./cor iamroles --max-unused-days 180 --format json
+
+# also flag roles with no attached/inline policies and no instance profile
+./cor iamroles --include-empty
+
+# unattached customer-managed policies, preview deletion without touching AWS
+./cor iampolicies --delete --dry-run
+
+# clean up unused app roles under a path, non-interactive + resumable
+./cor iamroles --path-prefix /application/ --delete --yes \
+    --state-file /var/lib/cor/iamroles.state --on-error continue
+
+# safety allowlist: only touch entities you explicitly tagged
+./cor iampolicies --require-tag cor-managed=true --delete --dry-run
+```
+
+AWS service-linked roles (`/aws-service-role/…`) and AWS-managed policies are
+always excluded and never deleted.
+
+`--require-tag key[=value]` (comma-separated for multiple) is an opt-in
+allowlist: when set, only entities carrying **all** the given tags are eligible —
+anything else is not even listed. Recommended for shared accounts to restrict
+COR to entities you own (e.g. `cor-managed=true`).
+
+**Required IAM permissions.** Read-only (listing) needs:
+
+```
+iam:ListRoles, iam:GetRole, iam:ListAttachedRolePolicies, iam:ListRolePolicies,
+iam:ListInstanceProfilesForRole, iam:ListPolicies, iam:ListPolicyVersions,
+iam:ListPolicyTags
+```
+
+(`iam:ListPolicyTags` is only needed when using `--require-tag` on `iampolicies`;
+role tags come back with `iam:GetRole`.)
+
+`--delete` additionally needs:
+
+```
+iam:DetachRolePolicy, iam:DeleteRolePolicy, iam:RemoveRoleFromInstanceProfile,
+iam:DeleteRole, iam:DeletePolicyVersion, iam:DeletePolicy
 ```
 
 ### Troubleshooting

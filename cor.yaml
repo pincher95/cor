@@ -65,3 +65,16 @@ include-up: false
 filter-by-resource: ""
 include-associated: false
 include-non-vpc: false
+
+# iamroles:
+# filter-by-name: ""     # substring/glob on role name
+path-prefix: "" # e.g. /application/ (empty = all roles)
+max-unused-days: 90 # never-used roles must also be at least this old
+include-empty: false # also flag roles with no attached/inline policies and no instance profile
+require-tag: "" # safety allowlist: only touch roles with ALL these tags (key or key=value, comma-separated)
+
+# iampolicies:
+# path-prefix: ""        # e.g. /service-role/
+min-age-days: 0 # only report policies created at least this many days ago
+# include-attached       # shared flat key, set once above (targetgroups); also applies here
+# require-tag: ""        # safety allowlist (same syntax as iamroles); uses iam:ListPolicyTags
