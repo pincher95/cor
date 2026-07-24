@@ -41,6 +41,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/opensearch"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -68,6 +69,7 @@ type AWSClientImpl struct {
 	S3          *s3.Client
 	ECS         *ecs.Client
 	Bedrock     *bedrock.Client
+	IAM         *iam.Client
 }
 
 // CloudConfig is the configuration for the AWS client

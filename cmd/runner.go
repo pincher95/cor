@@ -43,6 +43,8 @@ var ceConsumers = map[string]bool{
 var globalServices = map[string]bool{
 	"s3buckets":    true,
 	"route53zones": true,
+	"iamroles":     true,
+	"iampolicies":  true,
 }
 
 // CommandSetup declares per-command variation for runResourceCommand.

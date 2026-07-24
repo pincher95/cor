@@ -197,6 +197,8 @@ func addSubcommandsPallets() {
 	rootCmd.AddCommand(ecsCmd)
 	rootCmd.AddCommand(ec2Cmd)
 	rootCmd.AddCommand(bedrockCmd)
+	rootCmd.AddCommand(iamPoliciesCmd)
+	rootCmd.AddCommand(iamRolesCmd)
 }
 
 func init() {
